@@ -1,0 +1,36 @@
+const clamp=(value,min=0,max=100)=>Math.max(min,Math.min(max,Number(value)||0));
+
+export const TAXI_SYSTEM_VERSION=1;
+export const taxiCompanyCatalog=Object.freeze([
+  {id:"taxi-central",name:"Central Táxi Vila",color:"#d6aa3d",baseFare:7.5,kmFare:3.2,nightMultiplier:1.18,reputation:78},
+  {id:"radio-esperanca",name:"Rádio Táxi Esperança",color:"#3f7b68",baseFare:6.8,kmFare:3.45,nightMultiplier:1.15,reputation:74},
+]);
+
+export function createTaxiSystem(options={}){
+  return {version:TAXI_SYSTEM_VERSION,companies:taxiCompanyCatalog.map(company=>({...company,cash:Number(options.initialCash)||18000,vehicleIds:[],driverIds:[],rides:0,revenue:0})),stands:(options.stands||[]).map(stand=>({...stand})),pending:[],active:[],history:[],statistics:{requested:0,completed:0,cancelled:0,refused:0,revenue:0,totalWait:0,totalDistance:0},averageWait:0,demandByHour:Array(24).fill(0),revision:0};
+}
+
+export function normalizeTaxiSystem(state={},options={}){const base=state?.version===TAXI_SYSTEM_VERSION?state:createTaxiSystem(options);return {...base,version:TAXI_SYSTEM_VERSION,companies:(base.companies||[]).map(company=>({...company,vehicleIds:[...(company.vehicleIds||[])],driverIds:[...(company.driverIds||[])]})),stands:(base.stands||[]).map(stand=>({...stand})),pending:(base.pending||[]).map(ride=>({...ride})),active:(base.active||[]).map(ride=>({...ride})),history:(base.history||[]).slice(0,120).map(ride=>({...ride})),statistics:{...createTaxiSystem().statistics,...base.statistics},demandByHour:[...(base.demandByHour||Array(24).fill(0))],revision:Number(base.revision)||0};}
+
+export function estimateTaxiFare(distance,company=taxiCompanyCatalog[0],options={}){const hour=Number(options.hour)||0,night=hour>=22||hour<6,weatherSurcharge=options.severeWeather ? .18 : options.rain ? .08 : 0,demandSurcharge=clamp((Number(options.demand)||0)-4,0,12)*.018;return Math.round((company.baseFare+Math.max(.5,Number(distance)||0)*company.kmFare)*(night?company.nightMultiplier:1)*(1+weatherSurcharge+demandSurcharge)*100)/100;}
+
+export function taxiSuitability(person={},trip={},environment={}){if(!person.alive||person.age<16||person.justice?.incarcerated)return 0;const distance=Number(trip.distance)||0,hour=Number(trip.hour)||0,urgency=Number(trip.priority)||0,wealth=Number(person.money)||0;let score=distance*6+(urgency>=80?22:0)+(environment.rain?12:0)+(environment.storm||environment.snow?18:0)+(hour>=22||hour<6?10:0)+(person.mobility?.preferred==="táxi"?28:0)-(wealth<120?50:wealth<500?18:0);if(distance<2)score-=35;if(person.mobility?.vehicleIds?.length)score-=20;return clamp(score);}
+
+export function findAvailableTaxi(state,vehicles=[],origin={x:0,y:0}){const activeIds=new Set((state.active||[]).map(ride=>ride.vehicleId));return vehicles.filter(vehicle=>vehicle.use==="taxi"&&vehicle.status==="active"&&!activeIds.has(vehicle.id)).map(vehicle=>({vehicle,distance:Math.hypot((vehicle.x||0)-origin.x,(vehicle.y||0)-origin.y)})).sort((a,b)=>a.distance-b.distance)[0]||null;}
+
+export function requestTaxiRide(previousState,request,vehicles=[],options={}){
+  const state=normalizeTaxiSystem(previousState),hour=Math.max(0,Math.min(23,Math.floor(Number(request.hour)||0))),company=state.companies.find(item=>item.id===request.companyId)||state.companies[hour%state.companies.length],available=findAvailableTaxi(state,vehicles,request.origin),statistics={...state.statistics,requested:state.statistics.requested+1},demandByHour=state.demandByHour.slice();demandByHour[hour]++;
+  if(!available){statistics.refused++;return {ok:false,reason:"no_vehicle",state:{...state,statistics,demandByHour,revision:state.revision+1}};}
+  const fare=estimateTaxiFare(request.distance,company,{hour,rain:options.rain,severeWeather:options.severeWeather,demand:demandByHour[hour]}),waitMinutes=Math.max(2,Math.round(available.distance*.3+2));
+  if(Number(request.availableMoney)<fare){statistics.refused++;return {ok:false,reason:"unaffordable",fare,state:{...state,statistics,demandByHour,revision:state.revision+1}};}
+  const ride={id:`taxi-ride:${request.week||1}:${request.day||0}:${request.personId}:${state.revision+1}`,personId:request.personId,vehicleId:available.vehicle.id,driverId:available.vehicle.driverId||null,companyId:company.id,origin:{...request.origin},destination:{...request.destination},distance:Number(request.distance)||0,fare,waitMinutes,status:"dispatched",requestedWeek:request.week||1,requestedDay:request.day||0,requestedMinute:request.minute||0};
+  statistics.totalWait+=waitMinutes;return {ok:true,ride,fare,waitMinutes,state:{...state,pending:[ride,...state.pending].slice(0,80),statistics,demandByHour,averageWait:statistics.requested?statistics.totalWait/statistics.requested:0,revision:state.revision+1}};
+}
+
+export function boardTaxiRide(previousState,rideId){const state=normalizeTaxiSystem(previousState),ride=state.pending.find(item=>item.id===rideId);if(!ride)return {ok:false,state};const boarded={...ride,status:"active"};return {ok:true,ride:boarded,state:{...state,pending:state.pending.filter(item=>item.id!==rideId),active:[boarded,...state.active],revision:state.revision+1}};}
+
+export function finishTaxiRide(previousState,rideId,options={}){const state=normalizeTaxiSystem(previousState),ride=state.active.find(item=>item.id===rideId)||state.pending.find(item=>item.id===rideId);if(!ride)return {ok:false,state};const completed={...ride,status:"completed",completedWeek:options.week||ride.requestedWeek,completedDay:options.day??ride.requestedDay,completedMinute:options.minute??0},companies=state.companies.map(company=>company.id===ride.companyId?{...company,cash:company.cash+ride.fare,rides:company.rides+1,revenue:company.revenue+ride.fare}:company),statistics={...state.statistics,completed:state.statistics.completed+1,revenue:state.statistics.revenue+ride.fare,totalDistance:state.statistics.totalDistance+ride.distance};return {ok:true,ride:completed,state:{...state,companies,pending:state.pending.filter(item=>item.id!==rideId),active:state.active.filter(item=>item.id!==rideId),history:[completed,...state.history].slice(0,120),statistics,revision:state.revision+1}};}
+
+export function cancelTaxiRide(previousState,rideId,reason="cancelled"){const state=normalizeTaxiSystem(previousState),ride=[...state.pending,...state.active].find(item=>item.id===rideId);if(!ride)return {ok:false,state};const cancelled={...ride,status:"cancelled",reason},statistics={...state.statistics,cancelled:state.statistics.cancelled+1};return {ok:true,ride:cancelled,state:{...state,pending:state.pending.filter(item=>item.id!==rideId),active:state.active.filter(item=>item.id!==rideId),history:[cancelled,...state.history].slice(0,120),statistics,revision:state.revision+1}};}
+
+export function summarizeTaxiSystem(state){const normalized=normalizeTaxiSystem(state),available=Math.max(0,normalized.companies.reduce((sum,company)=>sum+company.vehicleIds.length,0)-normalized.active.length);return {companies:normalized.companies.length,fleet:normalized.companies.reduce((sum,company)=>sum+company.vehicleIds.length,0),available,activeRides:normalized.active.length,pending:normalized.pending.length,completed:normalized.statistics.completed,cancelled:normalized.statistics.cancelled,averageWait:Math.round(normalized.averageWait*10)/10,revenue:Math.round(normalized.statistics.revenue)};}

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#111815" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Cidade Viva</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+    <noscript><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet"></noscript>
+    <style>
+      #gameSplash{position:fixed;z-index:1000;inset:0;display:grid;place-items:center;overflow:hidden;padding:24px;background:radial-gradient(circle at 50% 38%,#284c39 0,#14271e 45%,#09120e 100%);color:#f8f3e8;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+      #gameSplash .splash-stage{width:min(520px,100%);text-align:center}
+      #gameSplash .splash-city{position:relative;height:132px;margin:0 auto 22px;overflow:hidden;border-bottom:1px solid #d7b26766}
+      #gameSplash .splash-sun{position:absolute;top:8px;right:17%;width:42px;height:42px;border:1px solid #e1bd70;border-radius:50%;box-shadow:0 0 32px #d7b26745}
+      #gameSplash .splash-skyline{position:absolute;right:0;bottom:0;left:0;height:96px;display:flex;align-items:flex-end;justify-content:center;gap:5px}
+      #gameSplash .splash-building{display:block;width:11%;min-width:28px;height:var(--splash-height,60%);border:1px solid #d7b26745;border-bottom:0;background:linear-gradient(180deg,#274b39,#10241a);box-shadow:inset 0 0 0 3px #0d1e16}
+      #gameSplash .splash-mark{width:72px;height:72px;margin:0 auto 16px;display:grid;place-items:center;border:1px solid #d7b26799;border-radius:50%}
+      #gameSplash .splash-mark span{width:54px;height:54px;display:grid;place-items:center;border-radius:50%;background:#d7b267;color:#14251d;font:700 22px Georgia,serif}
+      #gameSplash .splash-copy small{color:#d7b267;font-size:9px;letter-spacing:.28em}
+      #gameSplash .splash-copy h1{margin:6px 0 4px;font:700 clamp(34px,9vw,48px) Georgia,serif}
+      #gameSplash .splash-copy p{margin:0;color:#b7c3bc;font-size:12px}
+      #gameSplash .splash-feedback{position:relative;width:min(320px,82vw);margin:24px auto 0}
+      #gameSplash .splash-feedback::after{position:absolute;right:0;bottom:0;left:0;height:3px;content:"";border-radius:3px;background:#ffffff1c}
+      #gameSplash .splash-status-row{display:flex;justify-content:space-between;gap:16px;margin-bottom:8px;color:#c6d0ca;font-size:10px}
+      #gameSplash .splash-progress{position:relative;z-index:1;width:8%;height:3px;overflow:hidden;border-radius:3px;background:#d7b267}
+      #gameSplash .splash-progress i{display:block;width:100%;height:100%;background:transparent}
+      @media(max-width:520px){#gameSplash{padding:18px}#gameSplash .splash-city{height:104px;margin-bottom:18px}#gameSplash .splash-skyline{height:76px}}
+      @media(prefers-reduced-motion:reduce){#gameSplash *,#gameSplash *::before,#gameSplash *::after{animation:none!important;transition:none!important}}
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="game-splash visible game-splash-static" id="gameSplash" role="status" aria-live="polite" aria-atomic="true" aria-label="Carregando Cidade Viva">
+        <div class="splash-stage">
+          <div class="splash-city" aria-hidden="true">
+            <span class="splash-sun"></span>
+            <div class="splash-skyline">
+              <i class="splash-building" style="--splash-height:42%"></i>
+              <i class="splash-building" style="--splash-height:66%"></i>
+              <i class="splash-building splash-building-tower" style="--splash-height:88%"></i>
+              <i class="splash-building" style="--splash-height:54%"></i>
+              <i class="splash-building" style="--splash-height:74%"></i>
+              <i class="splash-building" style="--splash-height:47%"></i>
+            </div>
+            <span class="splash-road"></span>
+          </div>
+          <div class="splash-mark" aria-hidden="true"><span>CV</span></div>
+          <div class="splash-copy">
+            <small>SIMULAÇÃO URBANA</small>
+            <h1>Cidade Viva</h1>
+            <p>Uma cidade. Mil histórias em movimento.</p>
+          </div>
+          <div class="splash-feedback">
+            <div class="splash-status-row">
+              <span id="splashStatus">Preparando Vila Esperança…</span>
+              <output id="splashPercent" aria-hidden="true">0%</output>
+            </div>
+            <div class="splash-progress" id="splashProgressBar" role="progressbar" aria-labelledby="splashStatus" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <i></i>
+            </div>
+          </div>
+        </div>
+      </div>
+      <noscript><style>#gameSplash{display:none}</style><p style="margin:0;padding:24px;font-family:system-ui,sans-serif">Cidade Viva precisa de JavaScript para iniciar a simulação.</p></noscript>
+    </div>
+    <script type="module" src="/src/app.js"></script>
+  </body>
+</html>

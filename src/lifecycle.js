@@ -1,0 +1,12 @@
+export const eyeColors=['castanhos','verdes','azuis','mel'];
+export const hairColors=['pretos','castanhos','loiros','ruivos'];
+export const skinTones=['clara','média','morena','escura'];
+export const identities=['mulher','homem','não binário'];
+export const orientations=['heterossexual','bissexual','homossexual'];
+const pick=a=>a[Math.floor(Math.random()*a.length)];
+export const randomGenetics=()=>({eyes:pick(eyeColors),hair:pick(hairColors),skin:pick(skinTones),height:Math.round(154+Math.random()*38),beauty:Math.round(25+Math.random()*70),charisma:Math.round(25+Math.random()*70)});
+export const inheritGenetics=(a,b)=>({eyes:Math.random()<.5?a.eyes:b.eyes,hair:Math.random()<.5?a.hair:b.hair,skin:Math.random()<.5?a.skin:b.skin,height:Math.round((a.height+b.height)/2+(Math.random()-.5)*10),beauty:Math.round((a.beauty+b.beauty)/2+(Math.random()-.5)*18),charisma:Math.round((a.charisma+b.charisma)/2+(Math.random()-.5)*20)});
+export const inheritTraits=(a,b)=>[Math.random()<.5?a[0]:b[0],Math.random()<.5?a[1]:b[1]];
+export const randomIdentity=(rng=Math.random)=>{const roll=rng();return roll<.485?'mulher':roll<.97?'homem':'não binário';};
+export const pronounsForIdentity=identity=>identity==='mulher'?{subject:'ela',object:'dela'}:identity==='homem'?{subject:'ele',object:'dele'}:{subject:'elu',object:'delu'};
+export const randomOrientation=()=>pick(orientations);

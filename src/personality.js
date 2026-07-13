@@ -1,0 +1,8 @@
+export const interests=['música','esportes','literatura','culinária','tecnologia','política','jardinagem','cinema','artes','viagens','história','ciência','moda','negócios','natureza'];
+export const talents=['liderança','oratória','raciocínio lógico','trabalho manual','escrita','negociação','cuidado','criatividade','memória','atletismo'];
+export const values=['família','independência','tradição','justiça','sucesso','comunidade','conhecimento','segurança','liberdade','solidariedade'];
+export const familyOrigins=['zona rural próxima','capital do estado','interior paulista','litoral','região sul','nordeste brasileiro','família imigrante','fundadores locais'];
+const pick=a=>a[Math.floor(Math.random()*a.length)];
+const score=()=>Math.round(15+Math.random()*80);
+export function generatePersonality(traits=[]){const dimensions={openness:score(),conscientiousness:score(),extraversion:score(),agreeableness:score(),stability:score()};if(traits.includes('sociável'))dimensions.extraversion=Math.max(68,dimensions.extraversion);if(traits.includes('reservado'))dimensions.extraversion=Math.min(38,dimensions.extraversion);if(traits.includes('metódico'))dimensions.conscientiousness=Math.max(72,dimensions.conscientiousness);if(traits.includes('criativo'))dimensions.openness=Math.max(72,dimensions.openness);return{dimensions,values:[pick(values),pick(values)],interests:[pick(interests),pick(interests),pick(interests)],talent:pick(talents),riskTolerance:score(),empathy:score(),workEthic:score(),lifeSatisfaction:55+Math.floor(Math.random()*35)};}
+export const generateNotability=()=>({score:0,famous:false,title:null,notableActions:[],followers:0,legacy:0});
