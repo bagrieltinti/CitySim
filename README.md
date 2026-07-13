@@ -2,6 +2,8 @@
 
 Simulação urbana sistêmica em navegador, com dois modos:
 
+**Jogar:** [citysim-two.vercel.app](https://citysim-two.vercel.app)
+
 - **Sandbox observador:** acompanhe cidadãos, famílias, economia, política e evolução urbana.
 - **Gameplay:** crie um cidadão e tome decisões dentro da mesma cidade simulada.
 
