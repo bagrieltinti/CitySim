@@ -1999,7 +1999,13 @@ function advancePublicWorksInPlace(state, context, events, effects) {
     const weeklySpend = work.budget / work.expectedWeeks;
     const treasuryProvided = context.treasury != null || context.money != null;
     const treasury = Number(context.treasury ?? context.money ?? 0);
-    if (treasuryProvided && treasury < weeklySpend) {
+    const queuedTreasuryDelta = effects
+      .filter((effect) => effect.domain === "treasury" && effect.target === "municipalTreasury")
+      .reduce((total, effect) => total + Number(effect.delta || 0), 0);
+    const availableTreasury = treasuryProvided ? Math.max(0, treasury + queuedTreasuryDelta) : Number.POSITIVE_INFINITY;
+    const remaining = Math.max(0, work.budget - work.spent);
+    const spend = Math.min(remaining, weeklySpend);
+    if (treasuryProvided && availableTreasury + 0.005 < spend) {
       work.delayedWeeks += 1;
       work.stage = "delayed_by_budget";
       if (work.delayedWeeks === 1 || work.delayedWeeks % 4 === 0) {
@@ -2015,8 +2021,6 @@ function advancePublicWorksInPlace(state, context, events, effects) {
       return;
     }
     work.stage = "construction";
-    const remaining = Math.max(0, work.budget - work.spent);
-    const spend = Math.min(remaining, weeklySpend);
     work.spent = round(work.spent + spend, 2);
     work.progress = round(clamp(work.spent / work.budget * 100));
     if (spend > 0) queueEffect(state, effects, { domain: "treasury", target: "municipalTreasury", operation: "spend", delta: -spend, reversible: false }, { type: "public-work", id: work.id });

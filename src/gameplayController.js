@@ -22,6 +22,10 @@ import {
 } from "./gameplay.js";
 import { derivePlayerGoalProgress, nextPlayerGoalMilestone, PLAYER_GOAL_MILESTONES } from "./playerObjectives.js";
 import { executePlayerPropertyTransaction, getRealEstatePortal } from "./realEstateCoordinator.js";
+import { listPlaceInteractions } from "./placeInteractions.js";
+import { conditionById } from "./health.js";
+import { getGameplayRiskProfile } from "./gameplayDifficulty.js";
+import { getPlayerDevelopmentDashboard, PLAYER_DEVELOPMENT_DOMAINS, recordPlayerDevelopment, syncPlayerDevelopment } from "./playerDevelopment.js";
 
 const escapeHTML = (value = "") => String(value)
   .replaceAll("&", "&amp;")
@@ -35,9 +39,43 @@ const money = (value) => `R$ ${Math.round(Number(value) || 0).toLocaleString("pt
 const clockOf = (sim) => ({ week: sim?.week || 1, day: sim?.day || 0, minute: sim?.minute || 0 });
 const initials = (name = "") => name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
 const dayNames = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"];
-const actionIcons = { go_to: "⌖", go_home: "⌂", rest: "☾", eat: "◉", hygiene: "◇", wait: "◷", work: "▣", study: "✎", shop: "▤", talk: "◌", apply_job: "◆", enroll: "▧", seek_healthcare: "✚", buy_property: "⌂", rent_property: "⌑", cancel: "×" };
+const actionIcons = { go_to: "⌖", go_home: "⌂", rest: "☾", eat: "◉", hygiene: "◇", wait: "◷", work: "▣", study: "✎", shop: "▤", talk: "◌", interact_place: "✦", apply_job: "◆", enroll: "▧", seek_healthcare: "✚", buy_property: "⌂", rent_property: "⌑", cancel: "×" };
 const goalByAction = { work: ["career", 2], apply_job: ["career", 10], study: ["education", 3], enroll: ["education", 8], socialize: ["social", 3], shop: ["wealth", 1], buy_property: ["wealth", 18], rent_property: ["wealth", 6] };
+const developmentByAction = { rest: ["wellbeing", 6], eat: ["wellbeing", 4], hygiene: ["wellbeing", 4], seek_healthcare: ["wellbeing", 12], talk: ["relationships", 8], socialize: ["relationships", 10], work: ["career", 12], apply_job: ["career", 22], study: ["education", 12], enroll: ["education", 24], shop: ["finance", 2], buy_property: ["finance", 35], rent_property: ["finance", 18] };
+const negativeRelationshipActions = new Set(["argue", "breakup", "provoke", "insult", "intimidate"]);
+const hostilityReputationPenalty = Object.freeze({ argue: 1, provoke: 1, insult: 3, intimidate: 5 });
 const skinPreview = { clara: "#e5bda5", média: "#c48f70", morena: "#9b705a", escura: "#654638" };
+
+function placeDevelopmentReward(details = {}) {
+  const effects = details.effects || {}, domain = details.developmentDomain || (effects.civic
+    ? "civic"
+    : effects.career
+      ? "career"
+      : effects.finance
+        ? "finance"
+        : effects.education
+          ? "education"
+          : effects.health || effects.stress || effects.hunger || effects.hygiene || effects.comfort || effects.energy
+            ? "wellbeing"
+            : effects.social
+              ? "relationships"
+              : "culture");
+  const magnitude = domain === "civic" ? Math.abs(Number(effects.civic || 0))
+    : domain === "career" ? Math.abs(Number(effects.career || 0))
+      : domain === "finance" ? Math.abs(Number(effects.finance || 0))
+        : domain === "education" ? Math.abs(Number(effects.education || 0))
+          : domain === "relationships" ? Math.abs(Number(effects.social || 0)) * .5
+            : domain === "wellbeing" ? Math.max(
+              Math.abs(Number(effects.health || 0)) * 1.5,
+              Math.abs(Number(effects.stress || 0)) * .6,
+              Math.abs(Number(effects.hunger || 0)) * .2,
+              Math.abs(Number(effects.hygiene || 0)) * .2,
+              Math.abs(Number(effects.comfort || 0)) * .2,
+              Math.abs(Number(effects.energy || 0)) * .3,
+            )
+              : Math.max(2, Math.abs(Number(effects.happiness || 0)) * .5);
+  return [domain, Math.round(clamp(6 + magnitude, 6, 20))];
+}
 
 function actionButton({ action, title, subtitle, targetKind = "", targetId = "", icon, product = "", kind = "", role = "", course = "", operation = "", listingId = "", amount = 0, disabled = false, cost = "" }) {
   return `<button class="player-action" data-player-action="${escapeAttribute(action)}"${targetKind ? ` data-target-kind="${escapeAttribute(targetKind)}"` : ""}${targetId ? ` data-target-id="${escapeAttribute(targetId)}"` : ""}${product ? ` data-product="${escapeAttribute(product)}"` : ""}${kind ? ` data-interaction-kind="${escapeAttribute(kind)}"` : ""}${role ? ` data-role="${escapeAttribute(role)}"` : ""}${course ? ` data-course="${escapeAttribute(course)}"` : ""}${operation ? ` data-operation="${escapeAttribute(operation)}"` : ""}${listingId ? ` data-listing-id="${escapeAttribute(listingId)}"` : ""}${amount ? ` data-action-cost="${Number(amount)}"` : ""}${disabled ? " disabled" : ""}><i>${icon || actionIcons[action] || "•"}</i><span><b>${escapeHTML(title)}</b><small>${escapeHTML(subtitle || "")}</small></span>${cost ? `<em class="player-action-cost">${escapeHTML(cost)}</em>` : ""}</button>`;
@@ -60,6 +98,7 @@ export function createGameplayController(options = {}) {
   let panelExpanded = true;
   let lastPanelSignature = "";
   let lastCriticalSignature = "";
+  let lastCriticalRisk = "";
   let lastCommandOutcomeId = "";
   let setupRoot;
   let hudRoot;
@@ -218,6 +257,7 @@ export function createGameplayController(options = {}) {
     hudRoot.classList.toggle("player-hidden", mode !== GAME_MODES.GAMEPLAY);
     lastPanelSignature = "";
     lastCriticalSignature = "";
+    lastCriticalRisk = "";
     options.onActivated?.({ mode, slot: activeSlot, session });
     render(true);
   }
@@ -340,15 +380,37 @@ export function createGameplayController(options = {}) {
       const updated = updatePlayerGoal(session, goalId, increment, result.message, { clock: clockOf(sim()) });
       if (updated.ok) session = updated.state;
     };
+    const relationshipKind = command.actionId === "talk" ? (result.details?.kind || command.payload?.kind || "talk") : null;
+    const acceptedRelationshipAction = Boolean(relationshipKind && result.details?.accepted !== false);
+    const negativeRelationshipAction = Boolean(acceptedRelationshipAction && negativeRelationshipActions.has(relationshipKind));
+    let consequenceDetail = "";
     if (result.ok && goalByAction[command.actionId]) advanceGoal(...goalByAction[command.actionId]);
-    if (result.ok && command.actionId === "talk" && result.details?.accepted !== false) {
-      const kind = result.details?.kind || command.payload?.kind || "talk";
-      if (["family_chat", "family_meal", "family_care"].includes(kind)) { advanceGoal("family", kind === "family_meal" ? 5 : 3); advanceGoal("social", 2); }
-      else if (["define_exclusive", "define_dating", "move_in", "propose", "reconcile"].includes(kind)) { advanceGoal("family", kind === "move_in" || kind === "propose" ? 12 : 8); advanceGoal("social", 3); }
-      else if (!["argue", "breakup"].includes(kind)) advanceGoal("social", ["date", "first_kiss", "affection", "flirt"].includes(kind) ? 4 : 2);
+    if (result.ok && acceptedRelationshipAction) {
+      if (["family_chat", "family_meal", "family_care"].includes(relationshipKind)) { advanceGoal("family", relationshipKind === "family_meal" ? 5 : 3); advanceGoal("social", 2); }
+      else if (["define_exclusive", "define_dating", "move_in", "propose", "reconcile"].includes(relationshipKind)) { advanceGoal("family", relationshipKind === "move_in" || relationshipKind === "propose" ? 12 : 8); advanceGoal("social", 3); }
+      else if (!negativeRelationshipAction) advanceGoal("social", ["date", "first_kiss", "affection", "flirt"].includes(relationshipKind) ? 4 : 2);
+      const reputationPenalty = hostilityReputationPenalty[relationshipKind] || 0, actor = player();
+      if (reputationPenalty && actor) {
+        actor.playerState ||= {};
+        actor.playerState.reputation = Math.max(-100, Number(actor.playerState.reputation || 0) - reputationPenalty);
+        actor.playerState.hostileInteractions = Number(actor.playerState.hostileInteractions || 0) + 1;
+        actor.playerState.lastHostileInteraction = { kind: relationshipKind, week: sim().week, day: sim().day, minute: sim().minute };
+        actor.history ||= [];
+        actor.history.unshift({ week: sim().week, text: `${result.message || "Uma interação hostil"} A atitude prejudicou sua reputação em ${reputationPenalty} ponto(s).` });
+        actor.history = actor.history.slice(0, 80);
+        consequenceDetail = ` · Consequência: reputação -${reputationPenalty}.`;
+      }
+    }
+    let development = null;
+    if (result.ok) {
+      let reward = negativeRelationshipAction ? null : developmentByAction[command.actionId];
+      if (command.actionId === "interact_place") {
+        reward = placeDevelopmentReward(result.details);
+      }
+      if (reward) development = recordPlayerDevelopment(player(), sim(), { domain: reward[0], amount: reward[1], text: result.message || command.actionId });
     }
     lastCommandOutcomeId = command.id;
-    showToast(result.ok ? "Ação concluída" : "Ação não realizada", result.message || result.reason || "", result.ok ? "success" : "error");
+    showToast(result.ok ? (negativeRelationshipAction ? "Ação com consequências" : "Ação concluída") : "Ação não realizada", `${result.message || result.reason || ""}${consequenceDetail}${development?.leveledUp ? ` · Novo nível: ${development.levelName}.` : ""}`, result.ok ? (negativeRelationshipAction ? "warning" : "success") : "error");
     lastPanelSignature = "";
   }
 
@@ -359,6 +421,7 @@ export function createGameplayController(options = {}) {
     const buildingId = command.actionId === "go_home" ? actor.homeId : business?.buildingId || command.target?.id;
     if (["go_to", "go_home", "use_transport"].includes(command.actionId)) return current.issuePlayerTravel(buildingId, { commandId: command.id, mode: command.payload?.mode || "auto" });
     if (["rest", "eat", "hygiene", "work", "study", "wait"].includes(command.actionId)) return current.startPlayerActivity(command.actionId, { commandId: command.id, durationMinutes: command.estimatedDurationMinutes });
+    if (command.actionId === "interact_place") return current.playerInteractWithPlace(command.target?.id, command.payload?.kind, { commandId: command.id });
     if (command.actionId === "shop") return current.playerPurchase(command.target?.id, command.payload?.productName, { commandId: command.id });
     if (["talk", "socialize"].includes(command.actionId)) return current.playerInteractWithPerson(command.target?.id, command.payload?.kind || "talk", { commandId: command.id });
     if (command.actionId === "apply_job") return current.playerApplyForJob(command.target?.id, command.payload?.role, { commandId: command.id });
@@ -462,6 +525,11 @@ export function createGameplayController(options = {}) {
     actor.personalGoals = (session?.player?.character?.goals || []).map((goal) => ({ ...goal, milestones: [...(goal.milestones || [])] }));
   }
 
+  function journeyPanel(context) {
+    const dashboard = getPlayerDevelopmentDashboard(context.person, sim());
+    return `<div class="player-development-grid">${dashboard.domains.map(domain=>`<article><header><span><small>NÍVEL ${domain.level}</small><b>${escapeHTML(domain.name)}</b></span><em>${escapeHTML(domain.levelName)}</em></header><p>${escapeHTML(domain.description)}</p><i style="--player-value:${domain.progress}%"><b></b></i><small>${Math.round(domain.xp)} XP · próximo: ${escapeHTML(domain.nextLevelName)}</small></article>`).join("")}</div><h4 class="player-panel-heading">Oportunidades da sua história</h4><div class="player-opportunity-list">${dashboard.opportunities.map(opportunity=>`<article class="opportunity-${opportunity.domain}"><span><small>${escapeHTML(PLAYER_DEVELOPMENT_DOMAINS.find(domain=>domain.id===opportunity.domain)?.name||opportunity.domain)}</small><b>${escapeHTML(opportunity.title)}</b><em>${escapeHTML(opportunity.description)}</em></span><p>${escapeHTML(opportunity.hint)}</p></article>`).join("")}</div><h4 class="player-panel-heading">Capítulos vividos</h4><div class="player-chapter-list">${dashboard.chapters.map(chapter=>`<article><time>Semana ${chapter.week}</time><span><b>${escapeHTML(chapter.title)}</b><small>${escapeHTML(chapter.text)}</small></span></article>`).join("")}</div><h4 class="player-panel-heading">Benefícios do desenvolvimento</h4><div class="player-protection-list"><span>Recuperação ×${dashboard.bonuses.recoveryMultiplier}</span><span>Aprendizado ×${dashboard.bonuses.learningMultiplier}</span><span>Renda profissional ×${dashboard.bonuses.wageMultiplier}</span><span>Influência cívica +${dashboard.bonuses.civicInfluence}</span></div>`;
+  }
+
   function objectivesPanel(context) {
     const goals = session?.player?.character?.goals || [];
     return `<div class="player-goal-list">${goals.map((goal) => {
@@ -484,9 +552,17 @@ export function createGameplayController(options = {}) {
       buttons.push(actionButton({ action: "eat", title: "Preparar refeição", subtitle: "Reduz a fome", targetKind: "home", targetId: home.id }));
       buttons.push(actionButton({ action: "hygiene", title: "Cuidar da higiene", subtitle: "Recupera higiene e conforto", targetKind: "home", targetId: home.id }));
     }
-    if (workplace?.id === place?.id && actor.shift) buttons.push(actionButton({ action: "work", title: "Iniciar expediente", subtitle: `${actor.role} · 2 horas`, targetKind: "building", targetId: place.id }));
-    if (institution?.id === place?.id && actor.education?.enrolled) buttons.push(actionButton({ action: "study", title: "Estudar", subtitle: "Desempenho, frequência e créditos", targetKind: "building", targetId: place.id }));
-    if (place?.type === "health") buttons.push(actionButton({ action: "seek_healthcare", title: "Solicitar atendimento", subtitle: actor.medical.conditions.length ? "Triagem e tratamento do quadro ativo" : "Consulta preventiva", targetKind: "building", targetId: place.id }));
+    if (workplace?.id === place?.id && actor.shift) {
+      const eligibility = sim().playerWorkEligibility?.(actor, 120) || { ok: true };
+      buttons.push(actionButton({ action: "work", title: "Iniciar expediente", subtitle: eligibility.ok ? `${actor.role} · 2 horas` : eligibility.reason, targetKind: "building", targetId: place.id, disabled: !eligibility.ok }));
+    }
+    if (institution?.id === place?.id && actor.education?.enrolled) {
+      const eligibility = sim().playerEducationEligibility?.(actor, institution) || { ok: true };
+      buttons.push(actionButton({ action: "study", title: "Estudar", subtitle: eligibility.ok ? "Desempenho, frequência e créditos" : eligibility.reason, targetKind: "building", targetId: place.id, disabled: !eligibility.ok }));
+    }
+    const healthcare = place?.type === "health" ? sim().playerHealthcareEligibility?.(actor, place) : null;
+    if (healthcare?.ok) buttons.push(actionButton({ action: "seek_healthcare", title: "Solicitar atendimento", subtitle: healthcare.service === "mental_health" ? "Acolhimento e cuidado em saúde mental" : healthcare.service === "dental" ? "Avaliação e cuidado odontológico" : actor.medical.conditions.length ? "Triagem e tratamento do quadro ativo" : "Consulta preventiva", targetKind: "building", targetId: place.id }));
+    listPlaceInteractions(sim(), actor, place).slice(0, 6).forEach((interaction) => buttons.push(actionButton({ action: "interact_place", title: interaction.label, subtitle: interaction.available ? `${interaction.description} · ${interaction.durationMinutes} min` : interaction.reason, targetKind: "building", targetId: place.id, kind: interaction.id, disabled: !interaction.available, amount: interaction.cost || 0, cost: interaction.cost ? money(interaction.cost) : "" })));
     if (business) Object.entries(business.products || {}).slice(0, 8).forEach(([name, product]) => buttons.push(actionButton({ action: "shop", title: name, subtitle: `${product.stock} em estoque${sim().isOpen(business) ? "" : " · fechado"}`, targetKind: "business", targetId: business.id, product: name, cost: money(product.price), disabled: !sim().isOpen(business) || product.stock <= 0 || actor.money < product.price })));
     nearbyPeople.slice(0, 4).forEach((person) => buttons.push(actionButton({ action: "talk", title: `Conversar com ${person.firstName}`, subtitle: person.activity, targetKind: "person", targetId: person.id, kind: "talk" })));
     if (!buttons.length) buttons.push(actionButton({ action: "wait", title: "Observar o movimento", subtitle: "Esperar 15 minutos" }));
@@ -495,7 +571,7 @@ export function createGameplayController(options = {}) {
 
   function placesPanel(context) {
     const destinations = nearbyDestinations(context).filter(({ building }) => building.type !== "home" || building.id === context.home?.id);
-    const essential = destinations.filter(({ building }) => building.id === context.home?.id || ["health", "school"].includes(building.type) || ["Agência Municipal de Emprego", "Prefeitura Municipal", "Delegacia"].includes(building.name));
+    const essential = destinations.filter(({ building }) => building.id === context.home?.id || ["health", "school"].includes(building.type) || ["Agência Municipal de Emprego", "Delegacia"].includes(building.name) || /prefeit/i.test(building.name));
     const categories = [...essential, ...destinations].filter((entry, index, all) => all.findIndex((candidate) => candidate.building.id === entry.building.id) === index).slice(0, 16);
     return `<label class="player-action-message">Como ir? <select id="playerTravelMode"><option value="auto">Melhor opção disponível</option><option value="a pé">A pé</option><option value="bicicleta">Bicicleta</option><option value="ônibus">Ônibus</option><option value="táxi">Táxi</option><option value="carro">Carro próprio</option></select></label><div class="player-action-grid">${categories.map(({ building, distance }) => actionButton({ action: "go_to", title: building.name, subtitle: `${formatAddress(building.address)} · ${distance.toFixed(1)} quadras`, targetKind: "building", targetId: building.id, icon: building.type === "school" ? "✎" : building.type === "home" ? "⌂" : "⌖" })).join("")}</div>`;
   }
@@ -517,14 +593,76 @@ export function createGameplayController(options = {}) {
     return `${decisions}${nearby}${contacts}`;
   }
 
+  function relationshipsPanel(context) {
+    const actor = context.person, nearbyIds = new Set(context.nearbyPeople.map((person) => person.id));
+    const entries = sim().relationshipsOf(actor).filter(({ person }) => person.alive).sort((left, right) => (right.link.affinity || 0) - (left.link.affinity || 0));
+    const groups = [
+      ["family", "Família", (link) => link.domain === "family" || link.type === "família"],
+      ["romance", "Relações amorosas", (link) => Boolean(link.lifecycle || ["casamento", "namoro", "parceiro"].includes(link.type))],
+      ["hostile", "Conflitos e relações hostis", (link) => link.type === "conflito" || (link.tension || 0) >= 28 || (link.affinity || 0) < 0],
+      ["friendship", "Amizades e vínculos positivos", (link) => ["amizade", "amigo"].includes(link.type) || (link.affinity || 0) >= 35],
+      ["known", "Conhecidos", () => true],
+    ];
+    const used = new Set(), sections = groups.map(([id, label, predicate]) => {
+      const matches = entries.filter(({ link, person }) => !used.has(person.id) && predicate(link)).slice(0, 14);
+      matches.forEach(({ person }) => used.add(person.id));
+      if (!matches.length) return "";
+      return `<section class="player-relationship-group player-relationship-${id}"><h4 class="player-panel-heading">${label} · ${matches.length}</h4><div class="player-contact-list">${matches.map(({ link, person }) => {
+        const stage = link.lifecycle?.stage?.replaceAll("_", " ") || link.type || "conhecido", location = sim().buildings.find((building) => building.id === person.locationId), present = nearbyIds.has(person.id);
+        return `<article class="player-contact-card"><i style="--player-contact:${escapeAttribute(person.color || "#78897d")}">${escapeHTML(initials(person.name))}</i><span><b>${escapeHTML(person.name)}</b><small>${escapeHTML(stage)} · afinidade ${Math.round(link.affinity || 0)} · confiança ${Math.round(link.trust || 0)}%</small><em>tensão ${Math.round(link.tension || 0)}% · ${present ? "aqui agora" : escapeHTML(location?.name || "em deslocamento")}</em></span><div><button data-player-open-person="${person.id}">${present ? "Ver interações disponíveis" : "Abrir relação"}</button><button data-player-locate-person="${person.id}">Localizar</button></div></article>`;
+      }).join("")}</div></section>`;
+    }).join("");
+    const romantic = entries.filter(({ link }) => link.lifecycle && !["encerrado", "separado", "divorciado"].includes(link.lifecycle.stage)).length;
+    return `<div class="player-relationship-summary"><span><small>CONHECIDOS</small><b>${entries.length}</b></span><span><small>FAMÍLIA</small><b>${entries.filter(({ link }) => link.domain === "family" || link.type === "família").length}</b></span><span><small>AMOROSOS ATIVOS</small><b>${romantic}</b></span><span><small>CONFLITOS</small><b>${entries.filter(({ link }) => link.type === "conflito" || (link.tension || 0) >= 28).length}</b></span></div><p class="player-action-message">Abra uma relação para ver ações organizadas por amizade, família, romance, compromisso e conflito. A disponibilidade reage ao local, intimidade, confiança e momento de vida.</p>${sections || `<p class="player-action-message">Seu personagem ainda não construiu relações registradas.</p>`}`;
+  }
+
+  function workPanel(context) {
+    const actor = context.person, buttons = [], workplace = context.workplace;
+    if (workplace) {
+      const present = context.place?.id === workplace.id, eligibility = present ? sim().playerWorkEligibility?.(actor, 120) || { ok: true } : { ok: true };
+      buttons.push(actionButton({ action: present ? "work" : "go_to", title: present ? "Iniciar expediente" : "Ir ao trabalho", subtitle: eligibility.ok ? `${actor.role} · ${workplace.name} · ${money(actor.hourlyWage || 0)}/h` : eligibility.reason, targetKind: "building", targetId: workplace.id, disabled: present && !eligibility.ok }));
+    }
+    if (!actor.shift && actor.age >= 18 && context.business) buttons.push(actionButton({ action: "apply_job", title: `Candidatar-se em ${context.business.name}`, subtitle: context.business.requiredRoles?.[0] || context.business.sector, targetKind: "business", targetId: context.business.id, role: context.business.requiredRoles?.[0] || "" }));
+    if (!actor.shift && actor.age >= 18) sim().businesses.filter((business) => !business.closed).sort((a, b) => (b.openVacancies || 0) - (a.openVacancies || 0) || a.employees.length - b.employees.length).slice(0, 12).forEach((business) => {
+      const building = sim().buildings.find((candidate) => candidate.id === business.buildingId), present = context.place?.id === business.buildingId;
+      if (!building) return;
+      buttons.push(actionButton({ action: present ? "apply_job" : "go_to", title: present ? `Candidatar-se em ${business.name}` : `Conhecer ${business.name}`, subtitle: `${business.requiredRoles?.[0] || business.sector} · ${business.openVacancies ? `${business.openVacancies} vaga(s)` : "candidatura espontânea"}`, targetKind: present ? "business" : "building", targetId: present ? business.id : building.id, role: business.requiredRoles?.[0] || "" }));
+    });
+    return `<div class="player-life-overview"><span><small>SITUAÇÃO</small><b>${actor.shift ? "Empregado" : "Sem vínculo"}</b></span><span><small>FUNÇÃO</small><b>${escapeHTML(actor.role || "—")}</b></span><span><small>LOCAL</small><b>${escapeHTML(actor.workplace || "—")}</b></span><span><small>RENDA / HORA</small><b>${money(actor.hourlyWage || 0)}</b></span></div><h4 class="player-panel-heading">Opções profissionais disponíveis</h4><div class="player-action-grid">${buttons.join("") || actionButton({ action: "wait", title: "Planejar carreira", subtitle: "Novas oportunidades surgirão com a economia local" })}</div>`;
+  }
+
+  function studyPanel(context) {
+    const actor = context.person, education = actor.education || {}, buttons = [];
+    if (context.institution) {
+      const present = context.place?.id === context.institution.id, eligibility = sim().playerEducationEligibility?.(actor, context.institution) || { ok: true };
+      buttons.push(actionButton({ action: present ? "study" : "go_to", title: present ? "Estudar agora" : "Ir estudar", subtitle: eligibility.ok ? `${context.institution.name} · desempenho ${Math.round(education.performance || 0)}%` : eligibility.reason, targetKind: "building", targetId: context.institution.id, disabled: present && !eligibility.ok }));
+    }
+    sim().buildings.filter((building) => building.type === "school" && building.id !== context.institution?.id).forEach((institution) => {
+      const present = context.place?.id === institution.id, eligibility = sim().playerEducationEligibility?.(actor, institution) || { ok: true };
+      buttons.push(actionButton({ action: present ? "enroll" : "go_to", title: present ? "Solicitar matrícula" : `Conhecer ${institution.name}`, subtitle: eligibility.ok ? (present ? "Escolher formação e iniciar estudos" : "Cursos, espaços e orientação acadêmica") : eligibility.reason, targetKind: "building", targetId: institution.id, course: actor.age >= 18 ? "Administração" : "", icon: "✎", disabled: present && !eligibility.ok }));
+    });
+    return `<div class="player-life-overview"><span><small>STATUS</small><b>${education.enrolled ? "Matriculado" : "Não matriculado"}</b></span><span><small>INSTITUIÇÃO</small><b>${escapeHTML(education.institution || "—")}</b></span><span><small>DESEMPENHO</small><b>${Math.round(education.performance || 0)}%</b></span><span><small>CRÉDITOS</small><b>${Math.round(education.credits || 0)}</b></span></div><h4 class="player-panel-heading">Estudo e formação</h4><div class="player-action-grid">${buttons.join("") || `<p class="player-action-message">Nenhuma opção educacional disponível neste momento.</p>`}</div>`;
+  }
+
+  function healthPanel(context) {
+    const actor = context.person, risk = getGameplayRiskProfile(actor, sim()), conditions = actor.medical?.conditions || [], buttons = [];
+    sim().buildings.filter((building) => building.type === "health").forEach((building) => {
+      const eligibility = sim().playerHealthcareEligibility?.(actor, building) || { ok: true, service: "general" };
+      if (!eligibility.ok) return;
+      const present = context.place?.id === building.id, serviceLabel = eligibility.service === "mental_health" ? "Saúde mental, acolhimento e terapia" : eligibility.service === "dental" ? "Prevenção e tratamento odontológico" : conditions.length ? "Triagem, exames e tratamento do quadro ativo" : "Consulta preventiva";
+      buttons.push(actionButton({ action: present ? "seek_healthcare" : "go_to", title: present ? `Solicitar atendimento em ${building.name}` : `Ir a ${building.name}`, subtitle: present ? serviceLabel : `${formatAddress(building.address)} · ${serviceLabel}`, targetKind: "building", targetId: building.id, icon: "✚" }));
+    });
+    return `<div class="player-risk-hero risk-${risk.level.id}"><span><small>DIFICULDADE · ${risk.difficulty.name.toUpperCase()}</small><b>Risco geral ${risk.level.label}</b><em>${risk.overall}/100</em></span><p>Doenças, acidentes e complicações podem atingir seu personagem e podem ser fatais. Quadros graves são sinalizados e oferecem tempo para reagir; internação e tratamento reduzem o risco.</p></div><div class="player-life-overview"><span><small>SAÚDE</small><b>${Math.round(actor.health)}%</b></span><span><small>SAÚDE MENTAL</small><b>${Math.round(actor.medical?.mentalHealth || 0)}%</b></span><span><small>ENERGIA</small><b>${Math.round(actor.energy)}%</b></span><span><small>CARGA CLÍNICA</small><b>${risk.burden}</b></span></div>${risk.warnings.length?`<h4 class="player-panel-heading">Alertas e como reagir</h4><div class="player-risk-warnings">${risk.warnings.map(warning=>`<article><b>${escapeHTML(warning.title)}</b><span>${escapeHTML(warning.detail)}</span><small>${escapeHTML(warning.response)}</small></article>`).join("")}</div>`:""}<h4 class="player-panel-heading">Condições ativas · ${conditions.length}</h4><div class="player-condition-list">${conditions.map(condition=>{const info=conditionById(condition.id);return `<article><span><b>${escapeHTML(info?.name||condition.id)}</b><small>Gravidade ${Math.round(condition.severity||info?.severity||0)} · ${Math.max(0,condition.remaining||0)} dia(s)</small></span><em>${escapeHTML(info?.treatment||"Acompanhamento clínico")}</em></article>`;}).join("")||"<p class='player-action-message'>Nenhuma condição ativa. A prevenção continua relevante.</p>"}</div>${risk.protections.length?`<h4 class="player-panel-heading">Fatores de proteção</h4><div class="player-protection-list">${risk.protections.map(item=>`<span>✓ ${escapeHTML(item)}</span>`).join("")}</div>`:""}<h4 class="player-panel-heading">Atendimento disponível</h4><div class="player-action-grid">${buttons.join("")}</div>`;
+  }
+
   function careerPanel(context) {
     const actor = context.person, buttons = [];
     if (context.workplace) {
-      if (context.place?.id === context.workplace.id) buttons.push(actionButton({ action: "work", title: "Trabalhar agora", subtitle: `${actor.role} · ${money(actor.hourlyWage || 0)}/h`, targetKind: "building", targetId: context.workplace.id }));
+      if (context.place?.id === context.workplace.id) { const eligibility = sim().playerWorkEligibility?.(actor, 120) || { ok: true }; buttons.push(actionButton({ action: "work", title: "Trabalhar agora", subtitle: eligibility.ok ? `${actor.role} · ${money(actor.hourlyWage || 0)}/h` : eligibility.reason, targetKind: "building", targetId: context.workplace.id, disabled: !eligibility.ok })); }
       else buttons.push(actionButton({ action: "go_to", title: `Ir ao trabalho`, subtitle: context.workplace.name, targetKind: "building", targetId: context.workplace.id }));
     }
     if (context.institution) {
-      if (context.place?.id === context.institution.id) buttons.push(actionButton({ action: "study", title: "Estudar agora", subtitle: `${actor.education.performance.toFixed(0)}% de desempenho`, targetKind: "building", targetId: context.institution.id }));
+      if (context.place?.id === context.institution.id) { const eligibility = sim().playerEducationEligibility?.(actor, context.institution) || { ok: true }; buttons.push(actionButton({ action: "study", title: "Estudar agora", subtitle: eligibility.ok ? `${actor.education.performance.toFixed(0)}% de desempenho` : eligibility.reason, targetKind: "building", targetId: context.institution.id, disabled: !eligibility.ok })); }
       else buttons.push(actionButton({ action: "go_to", title: "Ir estudar", subtitle: context.institution.name, targetKind: "building", targetId: context.institution.id }));
     }
     if (!actor.shift && actor.age >= 18 && context.business) buttons.push(actionButton({ action: "apply_job", title: `Candidatar-se em ${context.business.name}`, subtitle: `${context.business.requiredRoles?.[0] || context.business.sector} · você já está no local`, targetKind: "business", targetId: context.business.id, role: context.business.requiredRoles?.[0] || "" }));
@@ -534,7 +672,8 @@ export function createGameplayController(options = {}) {
       buttons.push(actionButton({ action: present ? "apply_job" : "go_to", title: present ? `Candidatar-se em ${business.name}` : `Conhecer ${business.name}`, subtitle: `${business.requiredRoles?.[0] || business.sector} · ${opportunity}`, targetKind: present ? "business" : "building", targetId: present ? business.id : building?.id, role: business.requiredRoles?.[0] || "" }));
     });
     sim().buildings.filter((building) => building.type === "school").forEach((institution) => {
-      if (context.place?.id === institution.id && context.institution?.id !== institution.id) buttons.push(actionButton({ action: "enroll", title: `Matricular-se`, subtitle: institution.name, targetKind: "building", targetId: institution.id, course: actor.age >= 18 ? "Administração" : "" }));
+      const eligibility = sim().playerEducationEligibility?.(actor, institution) || { ok: true };
+      if (context.place?.id === institution.id && context.institution?.id !== institution.id) buttons.push(actionButton({ action: "enroll", title: `Matricular-se`, subtitle: eligibility.ok ? institution.name : eligibility.reason, targetKind: "building", targetId: institution.id, course: actor.age >= 18 ? "Administração" : "", disabled: !eligibility.ok }));
       else if (context.institution?.id !== institution.id) buttons.push(actionButton({ action: "go_to", title: `Ir a ${institution.name}`, subtitle: actor.age >= 18 && institution.name.includes("Faculdade") ? "Conhecer cursos e solicitar matrícula" : "Conhecer a instituição", targetKind: "building", targetId: institution.id, icon: "✎" }));
     });
     return `<div class="player-action-grid">${buttons.join("") || actionButton({ action: "wait", title: "Planejar próximos passos", subtitle: "A cidade seguirá oferecendo oportunidades" })}</div>`;
@@ -553,7 +692,11 @@ export function createGameplayController(options = {}) {
   }
 
   function renderPanel(context, force = false) {
-    const actor = context.person, active = session.activeCommand, signature = [panelTab, panelExpanded, actor.locationId, actor.homeId, actor.workplace, actor.education?.institution, actor.shift?.name, Math.floor(actor.money), active?.id, session.commandQueue.length, context.business?.id, context.business ? sim().isOpen(context.business) : ""].join("|");
+    const actor = context.person, active = session.activeCommand, current = sim();
+    const nearbySignature = context.nearbyPeople.map((person) => person.id).sort().join(",");
+    const healthSignature = [Math.round(actor.health || 0), Math.round(actor.energy || 0), Math.round(actor.medical?.mentalHealth || 0), ...(actor.medical?.conditions || []).map((condition) => `${condition.id}:${Math.round(condition.severity || 0)}:${condition.remaining || 0}`)].join(",");
+    const developmentSignature = Object.values(actor.playerDevelopment?.domains || {}).map((domain) => `${Math.round(domain.xp || 0)}:${domain.level || 0}`).join(",");
+    const signature = [panelTab, panelExpanded, current.week, current.day, Math.floor(current.minute), actor.locationId, actor.homeId, actor.workplace, actor.education?.institution, actor.shift?.name, Math.floor(actor.money), healthSignature, developmentSignature, nearbySignature, actor.placeInteractionHistory?.[0]?.absoluteMinute || "", active?.id, session.commandQueue.length, context.business?.id, context.business ? current.isOpen(context.business) : ""].join("|");
     if (!force && signature === lastPanelSignature) return;
     lastPanelSignature = signature;
     const panel = hudRoot.querySelector("#playerActionPanel");
@@ -564,11 +707,13 @@ export function createGameplayController(options = {}) {
       ? `<i>⇄</i><span><b>Deslocamento em curso</b><small>${escapeHTML(sim().derivePersonAction(actor).text)}</small></span><em class="player-distance">${escapeHTML(actor.currentTrip.mode)}</em>`
       : `<i>${context.business ? "▣" : context.place?.type === "home" ? "⌂" : "⌖"}</i><span><b>${escapeHTML(context.place?.name || "Localização indisponível")}</b><small>${escapeHTML(context.place?.address ? formatAddress(context.place.address) : "Localização sendo atualizada")}</small></span><em class="player-distance">${context.nearbyPeople.length} pessoa(s)</em>`;
     const tabs = panel.querySelector("#playerActionTabs");
-    tabs.innerHTML = [["context", "Agora"], ["places", "Lugares"], ["people", "Pessoas"], ["career", "Trabalho e estudo"], ["property", "Moradia"], ["objectives", "Objetivos"]].map(([id, label]) => `<button class="player-action-tab ${panelTab === id ? "player-active" : ""}" data-player-tab="${id}">${label}</button>`).join("");
+    tabs.innerHTML = [["context", "Agora"], ["journey", "Jornada"], ["health", "Saúde"], ["people", "Pessoas"], ["relationships", "Relacionamentos"], ["work", "Trabalho"], ["study", "Estudos"], ["places", "Lugares"], ["property", "Moradia"], ["objectives", "Objetivos"]].map(([id, label]) => `<button class="player-action-tab ${panelTab === id ? "player-active" : ""}" data-player-tab="${id}">${label}</button>`).join("");
     const content = panel.querySelector("#playerActionBody");
+    const previousTravelMode = content.querySelector("#playerTravelMode")?.value || null;
     content.innerHTML = inTransit && panelTab !== "places"
       ? `<p class="player-action-message">Você está em trânsito. Aguarde a chegada, escolha outro destino em “Lugares” ou cancele o trajeto atual.</p>`
-      : panelTab === "places" ? placesPanel(context) : panelTab === "people" ? peoplePanel(context) : panelTab === "career" ? careerPanel(context) : panelTab === "property" ? propertyPanel(context) : panelTab === "objectives" ? objectivesPanel(context) : contextPanel(context);
+      : panelTab === "places" ? placesPanel(context) : panelTab === "journey" ? journeyPanel(context) : panelTab === "health" ? healthPanel(context) : panelTab === "people" ? peoplePanel(context) : panelTab === "relationships" ? relationshipsPanel(context) : panelTab === "work" ? workPanel(context) : panelTab === "study" ? studyPanel(context) : panelTab === "property" ? propertyPanel(context) : panelTab === "objectives" ? objectivesPanel(context) : contextPanel(context);
+    if (previousTravelMode && content.querySelector("#playerTravelMode")) content.querySelector("#playerTravelMode").value = previousTravelMode;
     if (active) content.insertAdjacentHTML("beforeend", `<p class="player-action-message">Em andamento: <b>${escapeHTML(active.actionId.replaceAll("_", " "))}</b>. ${session.commandQueue.length ? `${session.commandQueue.length} decisão(ões) na fila.` : ""}</p>${actionButton({ action: "cancel", title: "Cancelar ação atual", subtitle: "Interrompe a decisão em andamento", icon: "×" })}`);
   }
 
@@ -578,10 +723,19 @@ export function createGameplayController(options = {}) {
     const current = sim(), context = current.playerContext?.(), actor = context?.person;
     if (!actor) return;
     syncPlayerGoalsFromWorld(actor);
+    syncPlayerDevelopment(actor, current);
     const action = current.derivePersonAction(actor), place = context.place;
     hudRoot.querySelector("#playerAvatar").textContent = initials(actor.name);
     hudRoot.querySelector("#playerAvatar").style.setProperty("--player-avatar", actor.color || "#8e6b56");
     hudRoot.querySelector("#playerName").textContent = actor.name;
+    const followButton = hudRoot.querySelector("#playerFollowButton"), following = Boolean(options.isFollowing?.(actor));
+    if (followButton) {
+      followButton.classList.toggle("active", following);
+      followButton.setAttribute("aria-pressed", String(following));
+      followButton.setAttribute("aria-label", following ? "Parar de seguir meu personagem" : "Seguir meu personagem");
+      followButton.title = following ? "Parar de seguir" : "Seguir meu personagem";
+      followButton.textContent = following ? "◉" : "◎";
+    }
     hudRoot.querySelector("#playerRole").textContent = `${actor.age} anos · ${actor.role}`;
     hudRoot.querySelector("#playerLocation").textContent = actor.currentTrip ? `Em trânsito · ${action.mode || actor.currentTrip.mode}` : place?.name || "Localização indisponível";
     hudRoot.querySelector("#playerMoney").textContent = money(actor.money);
@@ -614,6 +768,12 @@ export function createGameplayController(options = {}) {
       else if (actor.medical?.conditions?.length) showToast("Mudança na saúde", "Consulte sua ficha e procure atendimento se necessário.", "warning");
     }
     lastCriticalSignature = critical;
+    const riskProfile = getGameplayRiskProfile(actor, current);
+    if (riskProfile.level.id === "critical" && lastCriticalRisk !== "critical") {
+      showToast("Risco crítico para o personagem", riskProfile.warnings[0]?.response || "Pause, avalie a saúde e procure atendimento.", "error");
+      options.onCriticalEvent?.("health_risk", actor);
+    }
+    lastCriticalRisk = riskProfile.level.id;
   }
 
   function decorateBuilding(root, building, business = null) {
@@ -621,9 +781,13 @@ export function createGameplayController(options = {}) {
     root.querySelector("[data-player-world-actions]")?.remove();
     const actor = player(), present = actor?.locationId === building.id && !actor.currentTrip, actions = [];
     if (!present) actions.push(actionButton({ action: "go_to", title: `Ir até ${building.name}`, subtitle: building.address ? formatAddress(building.address) : "Definir rota", targetKind: "building", targetId: building.id }));
+    if (present) listPlaceInteractions(sim(), actor, building).slice(0, 8).forEach((interaction) => actions.push(actionButton({ action: "interact_place", title: interaction.label, subtitle: interaction.available ? `${interaction.description} · ${interaction.durationMinutes} min` : interaction.reason, targetKind: "building", targetId: building.id, kind: interaction.id, disabled: !interaction.available, amount: interaction.cost || 0, cost: interaction.cost ? money(interaction.cost) : "" })));
     if (present && business) Object.entries(business.products || {}).slice(0, 6).forEach(([name, product]) => actions.push(actionButton({ action: "shop", title: `Comprar ${name}`, subtitle: `${product.stock} em estoque`, targetKind: "business", targetId: business.id, product: name, cost: money(product.price), disabled: !sim().isOpen(business) || !product.stock || actor.money < product.price })));
     if (present && business && !actor.shift && actor.age >= 18) actions.push(actionButton({ action: "apply_job", title: "Candidatar-se a uma vaga", subtitle: business.requiredRoles?.[0] || business.sector, targetKind: "business", targetId: business.id, role: business.requiredRoles?.[0] || "" }));
-    if (present && building.type === "school" && actor.education?.institution !== building.name) actions.push(actionButton({ action: "enroll", title: "Solicitar matrícula", subtitle: building.name, targetKind: "building", targetId: building.id, course: actor.age >= 18 ? "Administração" : "" }));
+    if (present && building.type === "school" && actor.education?.institution !== building.name) {
+      const eligibility = sim().playerEducationEligibility?.(actor, building) || { ok: true };
+      actions.push(actionButton({ action: "enroll", title: "Solicitar matrícula", subtitle: eligibility.ok ? building.name : eligibility.reason, targetKind: "building", targetId: building.id, course: actor.age >= 18 ? "Administração" : "", disabled: !eligibility.ok }));
+    }
     root.insertAdjacentHTML("afterbegin", `<section data-player-world-actions><small>SUAS AÇÕES NESTE LOCAL</small><div class="player-action-grid">${actions.join("") || actionButton({ action: "wait", title: "Observar o local", subtitle: "Aguardar alguns minutos" })}</div></section>`);
   }
 
@@ -635,16 +799,20 @@ export function createGameplayController(options = {}) {
     const samePlace = !actor.currentTrip && !target.currentTrip && actor.locationId === target.locationId, actions = [];
     if (samePlace) {
       const relationshipActions = sim().playerRelationshipActions?.(target.id) || [];
-      relationshipActions.forEach((entry) => actions.push(actionButton({
-        action: "talk",
-        title: entry.name,
-        subtitle: entry.available ? `${entry.description}${entry.acceptanceChance < .99 ? ` · receptividade estimada ${Math.round(entry.acceptanceChance * 100)}%` : ""}` : entry.reason,
-        targetKind: "person",
-        targetId: target.id,
-        kind: entry.id,
-        disabled: !entry.available,
-        icon: entry.category === "romance" ? "♡" : entry.category === "family" ? "⌂" : entry.category === "conflict" ? "!" : entry.category === "commitment" ? "◇" : "◌",
-      })));
+      const interactionGroups = [
+        { id: "friendship", label: "Amizade e convivência", categories: ["social", "friendship"], icon: "◌" },
+        { id: "family", label: "Família e cuidado", categories: ["family"], icon: "⌂" },
+        { id: "romance", label: "Romance e intimidade", categories: ["romance"], icon: "♡" },
+        { id: "commitment", label: "Compromisso e futuro", categories: ["commitment"], icon: "◇" },
+        { id: "relationship", label: "Reparação e limites", categories: ["relationship"], icon: "↺" },
+        { id: "hostile", label: "Conflito e hostilidade", categories: ["conflict", "hostile"], icon: "!" },
+      ];
+      interactionGroups.forEach((group) => {
+        const entries = relationshipActions.filter((entry) => group.categories.includes(entry.category));
+        if (!entries.length) return;
+        actions.push(`<h4 class="player-interaction-group-title interaction-${group.id}">${group.label}<small>${entries.filter((entry) => entry.available).length}/${entries.length} disponível(is)</small></h4>`);
+        entries.forEach((entry) => actions.push(actionButton({ action: "talk", title: entry.name, subtitle: entry.available ? `${entry.description}${entry.acceptanceChance < .99 ? ` · receptividade estimada ${Math.round(entry.acceptanceChance * 100)}%` : ""}` : entry.reason, targetKind: "person", targetId: target.id, kind: entry.id, disabled: !entry.available, icon: group.icon })));
+      });
       if (!relationshipActions.length) [["talk", "Conversar"], ["compliment", "Elogiar"], ["support", "Oferecer apoio"], ["flirt", "Flertar"], ["argue", "Discutir"]].forEach(([kind, label]) => actions.push(actionButton({ action: "talk", title: `${label} com ${target.firstName}`, subtitle: "A relação reagirá ao contexto", targetKind: "person", targetId: target.id, kind })));
     }
     else if (!target.currentTrip && target.locationId) {
@@ -658,6 +826,17 @@ export function createGameplayController(options = {}) {
   function mount(host = document.querySelector("#app")) {
     if (!host || mounted) return;
     host.insertAdjacentHTML("beforeend", `<div class="game-setup-shell" id="gameSetup" hidden></div><aside class="player-hud player-hidden" id="playerHud" hidden aria-label="Controles do personagem"><div class="player-topbar"><span class="player-topbar-item"><i>⌖</i><span><small>LOCAL</small><b id="playerLocation">—</b></span></span><span class="player-topbar-item"><i>◷</i><span><small>AGORA</small><b id="playerClock">—</b></span></span><span class="player-topbar-item"><i>¤</i><span><small>CARTEIRA</small><b id="playerMoney">—</b></span></span><span class="player-topbar-item"><i>☀</i><span><small>CLIMA</small><b id="playerWeather">—</b></span></span></div><section class="player-profile"><header class="player-profile-head"><i class="player-avatar" id="playerAvatar">CV</i><span class="player-profile-copy"><b id="playerName">Seu personagem</b><span id="playerRole">—</span></span><button class="player-profile-toggle" id="playerPanelToggle" title="Abrir ações">☰</button></header><div class="player-current-action"><i></i><span><small>AÇÃO ATUAL</small><b id="playerActionText">Aguardando sua decisão</b></span><time id="playerActionTime">livre</time></div><div class="player-needs">${["hunger", "social", "hygiene", "energy"].map((id) => `<div class="player-need" data-player-need="${id}"><div class="player-need-head"><span>${id}</span><b>100%</b></div><div class="player-need-track"><i></i></div></div>`).join("")}</div></section><div class="player-state-strip" id="playerStateStrip"></div><section class="player-objective"><small>OBJETIVO DE VIDA</small><b id="playerObjectiveName">Viver sua história</b><p id="playerObjectiveText"></p><div class="player-objective-progress" id="playerObjectiveProgress"><i></i></div></section><section class="player-action-panel" id="playerActionPanel"><header class="player-action-head"><span><small>O QUE FAZER?</small><b id="playerActionPlace">Local atual</b></span><button class="player-action-close" id="playerActionClose" title="Recolher painel">⌄</button></header><div class="player-interaction-context" id="playerInteractionContext"></div><div class="player-action-content"><div class="player-action-tabs" id="playerActionTabs"></div><div id="playerActionBody"></div></div></section><div class="player-toast-stack" id="playerToastStack" aria-live="polite"></div></aside>`);
+    const nameLabel = host.querySelector("#playerName"), nameButton = document.createElement("button");
+    nameButton.type = "button";
+    nameButton.id = "playerName";
+    nameButton.className = "player-name-button";
+    nameButton.title = "Abrir minha ficha";
+    nameButton.textContent = nameLabel?.textContent || "Seu personagem";
+    nameLabel?.replaceWith(nameButton);
+    const focusActions = document.createElement("div");
+    focusActions.className = "player-focus-actions";
+    focusActions.innerHTML = `<button type="button" id="playerLocateButton" title="Ir até meu personagem" aria-label="Ir até meu personagem">⌖</button><button type="button" id="playerFollowButton" title="Seguir meu personagem" aria-label="Seguir meu personagem" aria-pressed="false">◎</button>`;
+    host.querySelector("#playerPanelToggle")?.before(focusActions);
     setupRoot = document.querySelector("#gameSetup");
     hudRoot = document.querySelector("#playerHud");
     mounted = true;
@@ -703,6 +882,9 @@ export function createGameplayController(options = {}) {
       if (event.target.closest("[data-setup-resume]")) hideSetup(true);
     });
     hudRoot.addEventListener("click", (event) => {
+      if (event.target.closest("#playerName")) { const actor = player(); if (actor) options.onOpenPerson?.(actor); return; }
+      if (event.target.closest("#playerLocateButton")) { const actor = player(); if (actor) options.onLocatePerson?.(actor); return; }
+      if (event.target.closest("#playerFollowButton")) { const actor = player(); if (actor) options.onToggleFollow?.(actor); render(true); return; }
       const tab = event.target.closest("[data-player-tab]");
       if (tab) { panelTab = tab.dataset.playerTab; lastPanelSignature = ""; render(true); return; }
       if (event.target.closest("#playerPanelToggle")) { panelExpanded = true; lastPanelSignature = ""; render(true); return; }

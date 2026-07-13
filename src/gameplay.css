@@ -1134,7 +1134,7 @@
 
 .player-profile-head {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) auto;
+  grid-template-columns: 48px minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: center;
   padding: 11px;
@@ -1158,11 +1158,53 @@
   min-width: 0;
 }
 
-.player-profile-copy b {
+.player-profile-copy b,
+.player-name-button {
   overflow: hidden;
   font: 700 15px/1.2 'Playfair Display', Georgia, serif;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.player-name-button {
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  color: #fff7e5;
+  background: transparent;
+  text-align: left;
+}
+
+.player-name-button:hover,
+.player-name-button:focus-visible {
+  color: #e6c980;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  outline: none;
+}
+
+.player-focus-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.player-focus-actions button {
+  display: grid;
+  place-items: center;
+  width: 31px;
+  height: 31px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  color: #d8e1db;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.player-focus-actions button:hover,
+.player-focus-actions button.active {
+  border-color: rgba(224, 190, 112, 0.62);
+  color: #f3d887;
+  background: rgba(213, 178, 103, 0.16);
 }
 
 .player-profile-copy span {
@@ -2913,3 +2955,106 @@ body.gameplay-mode .player-topbar {
 .player-decision-list span { display: grid; gap: 3px; }
 .player-decision-list small { color: rgba(239, 243, 239, .66); font-size: 9px; line-height: 1.35; }
 .player-decision-list em { align-self: center; color: #dec580; font-size: 9px; font-style: normal; white-space: nowrap; }
+
+.player-life-overview,
+.player-relationship-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.player-life-overview > span,
+.player-relationship-summary > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 8px;
+  background: rgba(255,255,255,.045);
+}
+.player-life-overview small,
+.player-relationship-summary small { color: rgba(239,243,239,.54); font-size: 7px; letter-spacing: .08em; }
+.player-life-overview b,
+.player-relationship-summary b { overflow: hidden; color: #f5f0df; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+
+.player-interaction-group-title {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 7px 0 1px;
+  padding: 7px 9px;
+  border-left: 3px solid #789785;
+  border-radius: 5px;
+  color: #eef2ec;
+  background: rgba(255,255,255,.055);
+  font-size: 10px;
+}
+.player-interaction-group-title small { color: rgba(239,243,239,.55); font-size: 8px; font-weight: 500; }
+.player-interaction-group-title.interaction-family { border-color: #d1a95e; }
+.player-interaction-group-title.interaction-romance,
+.player-interaction-group-title.interaction-commitment { border-color: #c8848d; }
+.player-interaction-group-title.interaction-hostile { border-color: #ba625d; }
+.player-interaction-group-title.interaction-relationship { border-color: #7596b0; }
+
+.player-risk-hero {
+  margin-bottom: 10px;
+  padding: 12px;
+  border: 1px solid rgba(115,160,128,.28);
+  border-radius: 10px;
+  background: rgba(82,120,91,.12);
+}
+.player-risk-hero > span { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 2px 10px; }
+.player-risk-hero small { grid-column: 1 / -1; color: rgba(239,243,239,.55); font-size: 7px; letter-spacing: .09em; }
+.player-risk-hero b { color: #edf4ed; font-size: 14px; }
+.player-risk-hero em { color: #b9d4bf; font-size: 16px; font-style: normal; font-weight: 800; }
+.player-risk-hero p { margin: 7px 0 0; color: rgba(239,243,239,.67); font-size: 9px; line-height: 1.45; }
+.player-risk-hero.risk-attention { border-color: rgba(211,170,83,.4); background: rgba(173,126,44,.12); }
+.player-risk-hero.risk-high,
+.player-risk-hero.risk-critical { border-color: rgba(203,91,80,.48); background: rgba(158,61,53,.15); }
+.player-risk-warnings,
+.player-condition-list { display: grid; gap: 6px; }
+.player-risk-warnings article,
+.player-condition-list article { display: grid; gap: 3px; padding: 9px; border-radius: 8px; background: rgba(255,255,255,.055); }
+.player-risk-warnings b,
+.player-condition-list b { color: #f3efe1; font-size: 10px; }
+.player-risk-warnings span,
+.player-risk-warnings small,
+.player-condition-list small,
+.player-condition-list em { color: rgba(239,243,239,.62); font-size: 9px; font-style: normal; line-height: 1.35; }
+.player-protection-list { display: flex; flex-wrap: wrap; gap: 5px; }
+.player-protection-list span { padding: 6px 8px; border-radius: 14px; color: #dcebdc; background: rgba(93,142,106,.18); font-size: 8px; }
+
+.player-development-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }
+.player-development-grid article { display: grid; gap: 6px; padding: 10px; border: 1px solid rgba(255,255,255,.08); border-radius: 9px; background: rgba(255,255,255,.045); }
+.player-development-grid header { display: flex; justify-content: space-between; gap: 8px; }
+.player-development-grid header span { display: grid; gap: 2px; }
+.player-development-grid header small,
+.player-development-grid article > small { color: rgba(239,243,239,.52); font-size: 7px; }
+.player-development-grid header b { color: #f0f3ed; font-size: 11px; }
+.player-development-grid header em { color: #dec580; font-size: 8px; font-style: normal; text-align: right; }
+.player-development-grid p { margin: 0; color: rgba(239,243,239,.59); font-size: 8px; line-height: 1.35; }
+.player-development-grid article > i { overflow: hidden; height: 4px; border-radius: 3px; background: rgba(255,255,255,.08); }
+.player-development-grid article > i b { display: block; width: var(--player-value); height: 100%; background: linear-gradient(90deg,#7fa38a,#d6b667); }
+.player-opportunity-list,
+.player-chapter-list { display: grid; gap: 6px; }
+.player-opportunity-list article { display: grid; grid-template-columns: minmax(0,1fr) minmax(120px,.65fr); gap: 8px; padding: 9px; border-left: 3px solid #789785; border-radius: 7px; background: rgba(255,255,255,.05); }
+.player-opportunity-list span { display: grid; gap: 2px; }
+.player-opportunity-list small { color: #d9bd75; font-size: 7px; text-transform: uppercase; }
+.player-opportunity-list b { color: #f0f3ed; font-size: 10px; }
+.player-opportunity-list em,
+.player-opportunity-list p { margin: 0; color: rgba(239,243,239,.59); font-size: 8px; font-style: normal; line-height: 1.35; }
+.player-chapter-list article { display: grid; grid-template-columns: 64px minmax(0,1fr); gap: 8px; padding: 8px; border-radius: 7px; background: rgba(255,255,255,.04); }
+.player-chapter-list time { color: #d7bd78; font-size: 8px; }
+.player-chapter-list span { display: grid; gap: 2px; }
+.player-chapter-list b { color: #eff3ed; font-size: 10px; }
+.player-chapter-list small { color: rgba(239,243,239,.58); font-size: 8px; }
+
+@media (max-width: 620px) {
+  .player-life-overview,
+  .player-relationship-summary { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .player-development-grid { grid-template-columns: 1fr; }
+  .player-opportunity-list article { grid-template-columns: 1fr; }
+}

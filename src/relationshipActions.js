@@ -22,6 +22,27 @@ const romanticVisibility = (context) =>
   Boolean(context.isRomantic || (context.actor.age >= 18 && context.target.age >= 18 && !context.isFamily));
 
 const familyVisibility = (context) => Boolean(context.isFamily);
+const friendshipVisibility = (context) => Boolean(context.actor && context.target);
+const relationshipVisibility = (context) => Boolean(context.link);
+const highestResentment = (context) => Math.max(
+  Number(context.actorView?.resentment || 0),
+  Number(context.targetView?.resentment || 0),
+);
+const apologyVisibility = (context) => Boolean(
+  context.link && (metric(context, "tension") >= 5 || highestResentment(context) >= 5),
+);
+const hostileVisibility = (context) => Boolean(
+  context.actor?.age >= 18
+  && context.target?.age >= 18
+  && !context.isFamily
+  && !context.isRomantic,
+);
+const hostileReason = (context) => {
+  if (context.actor.age < 18 || context.target.age < 18) return "Interações hostis não estão disponíveis envolvendo menores de idade.";
+  if (context.isFamily) return "Ações hostis deliberadas não estão disponíveis contra familiares.";
+  if (context.isRomantic) return "Ações hostis deliberadas não estão disponíveis em um vínculo romântico.";
+  return null;
+};
 const COMMITTED_STAGES = Object.freeze(["namoro", "uniao_estavel", "noivado", "casamento"]);
 const familyPlanningVisibility = (context) => activeRomance(context) && stageIn(context, COMMITTED_STAGES);
 const familyPlanning = (context) => context.lifecycle?.familyPlanning || null;
@@ -82,10 +103,60 @@ const EFFECTS = Object.freeze({
     actorView: { affection: 2, trust: 3 }, targetView: { affection: 4, trust: 6 },
     actor: { social: 5, happiness: 1, stress: -2 }, target: { social: 7, happiness: 2, stress: -6 },
   },
+  getToKnow: {
+    link: { affinity: 3, trust: 2, respect: 1, tension: -1, reciprocity: 1.5 },
+    actorView: { affection: 2, trust: 1.5 }, targetView: { affection: 2, trust: 1.5 },
+    actor: { social: 8, happiness: 1, stress: -1 }, target: { social: 8, happiness: 1, stress: -1 },
+  },
+  joke: {
+    link: { affinity: 4, trust: 1, respect: 0.5, tension: -2, reciprocity: 1 },
+    actorView: { affection: 2 }, targetView: { affection: 3, trust: 0.5 },
+    actor: { social: 7, happiness: 2, stress: -1 }, target: { social: 6, happiness: 3, stress: -2 },
+  },
+  secret: {
+    link: { affinity: 4, trust: 7, respect: 2, tension: -1, reciprocity: 3 },
+    actorView: { affection: 3, trust: 5 }, targetView: { affection: 3, trust: 6 },
+    actor: { social: 7, happiness: 1, stress: -4 }, target: { social: 6, happiness: 1, stress: -1 },
+  },
+  hangOut: {
+    link: { affinity: 5, trust: 3, respect: 1, tension: -3, reciprocity: 3 },
+    actorView: { affection: 4, trust: 2 }, targetView: { affection: 4, trust: 2 },
+    actor: { social: 12, happiness: 3, energy: -2, stress: -3 }, target: { social: 12, happiness: 3, energy: -2, stress: -3 },
+  },
+  checkIn: {
+    link: { affinity: 3, trust: 4, respect: 2, tension: -2.5, reciprocity: 2 },
+    actorView: { affection: 2, trust: 2 }, targetView: { affection: 4, trust: 5 },
+    actor: { social: 5, happiness: 1, stress: -1 }, target: { social: 6, happiness: 2, stress: -4 },
+  },
+  apology: {
+    link: { affinity: 2, trust: 3, respect: 4, tension: -7, reciprocity: 2 },
+    actorView: { affection: 1, trust: 2, resentment: -3 }, targetView: { affection: 2, trust: 4, resentment: -6 },
+    actor: { social: 3, happiness: 1, stress: -4 }, target: { social: 3, happiness: 1, stress: -3 },
+  },
+  boundary: {
+    link: { affinity: -1, trust: 1, respect: 4, tension: 1.5, reciprocity: 1 },
+    actorView: { trust: 2, resentment: -2 }, targetView: { trust: 0.5, resentment: 1 },
+    actor: { social: 1, happiness: 1, stress: -5 }, target: { social: 0, happiness: -1, stress: 2 },
+  },
   argue: {
     link: { affinity: -6, trust: -4, respect: -2, tension: 11, reciprocity: -2 },
     actorView: { affection: -5, trust: -3, resentment: 7 }, targetView: { affection: -7, trust: -5, resentment: 10 },
     actor: { social: -3, happiness: -2, stress: 5 }, target: { social: -2, happiness: -3, stress: 7 },
+  },
+  provoke: {
+    link: { affinity: -4, trust: -2, respect: -4, tension: 8, reciprocity: -2 },
+    actorView: { affection: -3, trust: -2, resentment: 4 }, targetView: { affection: -5, trust: -3, resentment: 7 },
+    actor: { social: -1, happiness: -1, stress: 2 }, target: { social: -2, happiness: -3, stress: 6 },
+  },
+  insult: {
+    link: { affinity: -8, trust: -5, respect: -8, tension: 13, reciprocity: -4 },
+    actorView: { affection: -5, trust: -4, resentment: 7 }, targetView: { affection: -10, trust: -7, resentment: 13 },
+    actor: { social: -3, happiness: -2, stress: 4 }, target: { social: -5, happiness: -7, stress: 10 },
+  },
+  intimidate: {
+    link: { affinity: -10, trust: -10, respect: -12, tension: 18, reciprocity: -6 },
+    actorView: { affection: -7, trust: -7, resentment: 9 }, targetView: { affection: -14, trust: -12, resentment: 18 },
+    actor: { social: -4, happiness: -3, stress: 6 }, target: { social: -7, happiness: -10, stress: 16 },
   },
   familyChat: {
     link: { affinity: 3, trust: 2.5, respect: 1, tension: -1.5, reciprocity: 1 },
@@ -172,6 +243,99 @@ const ACTION_DEFINITIONS = [
     weights: { affinity: 0.08, trust: 0.2, tension: -0.15, compatibility: 0.05, agreeableness: 0.08 },
     acceptedText: ({ target }) => `${target.firstName} aceitou seu apoio e se sentiu acolhido(a).`,
     rejectedText: ({ target }) => `${target.firstName} agradeceu, mas preferiu lidar com isso em seu próprio tempo.`,
+  },
+  {
+    id: "get_to_know", name: "Conhecer melhor", category: "friendship", durationMinutes: 35, cooldownMinutes: 90,
+    description: "Fazer perguntas abertas sobre história, interesses e jeito de viver.", visible: friendshipVisibility,
+    eligibility: () => null, requiresAttention: true, baseAcceptance: 0.88,
+    experienceKind: "aprofundar_convivencia", tone: "positive", valence: 42, importance: 36, effects: EFFECTS.getToKnow,
+    weights: { affinity: 0.1, trust: 0.1, tension: -0.14, compatibility: 0.06, openness: 0.12, agreeableness: 0.05 },
+    acceptedText: ({ target }) => `Você e ${target.firstName} trocaram histórias e passaram a se conhecer melhor.`,
+    rejectedText: ({ target }) => `${target.firstName} preferiu não falar sobre a vida pessoal agora.`,
+  },
+  {
+    id: "tell_joke", name: "Contar uma piada", category: "friendship", durationMinutes: 12, cooldownMinutes: 75,
+    description: "Tentar aliviar o clima com humor e observar se a outra pessoa entra na brincadeira.", visible: friendshipVisibility,
+    eligibility: () => null, baseAcceptance: 0.78,
+    experienceKind: "momento_divertido", tone: "positive", valence: 46, importance: 30, effects: EFFECTS.joke,
+    weights: { affinity: 0.1, trust: 0.04, tension: -0.2, compatibility: 0.1, openness: 0.08, agreeableness: 0.05 },
+    acceptedText: ({ target }) => `${target.firstName} achou graça; vocês compartilharam um momento leve.`,
+    rejectedText: ({ target }) => `A piada não funcionou com ${target.firstName}, e o assunto mudou sem insistência.`,
+  },
+  {
+    id: "share_secret", name: "Compartilhar um segredo", category: "friendship", durationMinutes: 30, cooldownMinutes: 360,
+    description: "Confiar algo pessoal à outra pessoa, aprofundando intimidade e responsabilidade.", visible: friendshipVisibility,
+    eligibility: (context) => !context.link
+      ? "Vocês ainda precisam construir algum vínculo antes dessa confidência."
+      : metric(context, "trust") < 24
+        ? "Ainda falta confiança para compartilhar algo tão pessoal."
+        : null,
+    requiresAttention: true, baseAcceptance: 0.7,
+    experienceKind: "confidencia", tone: "support", valence: 58, importance: 56, effects: EFFECTS.secret,
+    weights: { affinity: 0.08, trust: 0.24, tension: -0.16, compatibility: 0.08, openness: 0.1, agreeableness: 0.08 },
+    acceptedText: ({ target }) => `${target.firstName} ouviu sua confidência com cuidado e discrição.`,
+    rejectedText: ({ target }) => `${target.firstName} não se sentiu confortável em receber essa confidência agora.`,
+  },
+  {
+    id: "hang_out", name: "Passar um tempo juntos", category: "friendship", durationMinutes: 90, cooldownMinutes: 360,
+    description: "Convidar a pessoa para ficar por perto, conversar e compartilhar uma atividade tranquila.", visible: friendshipVisibility,
+    eligibility: () => null, requiresAttention: true, baseAcceptance: 0.72,
+    experienceKind: "tempo_de_qualidade", tone: "positive", valence: 62, importance: 48, effects: EFFECTS.hangOut,
+    weights: { affinity: 0.14, trust: 0.1, tension: -0.18, compatibility: 0.12, agreeableness: 0.06 },
+    acceptedText: ({ target }) => `Você e ${target.firstName} passaram um tempo juntos e fortaleceram a convivência.`,
+    rejectedText: ({ target }) => `${target.firstName} não conseguiu ficar mais tempo, mas o convite foi respeitado.`,
+  },
+  {
+    id: "check_in", name: "Perguntar como está", category: "friendship", durationMinutes: 25, cooldownMinutes: 180,
+    description: "Demonstrar interesse genuíno pelo momento emocional e pelas necessidades da pessoa.", visible: friendshipVisibility,
+    eligibility: () => null, requiresAttention: true, baseAcceptance: 0.82,
+    experienceKind: "cuidado_cotidiano", tone: "support", valence: 50, importance: 42, effects: EFFECTS.checkIn,
+    weights: { affinity: 0.08, trust: 0.18, tension: -0.16, agreeableness: 0.1 },
+    acceptedText: ({ target }) => `${target.firstName} contou como estava e se sentiu considerado(a).`,
+    rejectedText: ({ target }) => `${target.firstName} agradeceu a atenção, mas preferiu não conversar sobre isso.`,
+  },
+  {
+    id: "apologize", name: "Pedir desculpas", category: "relationship", durationMinutes: 30, cooldownMinutes: 240,
+    description: "Reconhecer uma atitude específica, assumir responsabilidade e ouvir o impacto causado.", visible: apologyVisibility,
+    eligibility: (context) => !context.link
+      ? "Ainda não existe um vínculo no qual pedir desculpas."
+      : metric(context, "tension") < 5 && highestResentment(context) < 5
+        ? "Não há um atrito recente que exija um pedido de desculpas."
+        : null,
+    requiresAttention: true, baseAcceptance: 0.62,
+    experienceKind: "pedido_de_desculpas", tone: "support", valence: 48, importance: 56, effects: EFFECTS.apology,
+    weights: { affinity: 0.06, trust: 0.18, tension: -0.14, communication: 0.16, repairCapacity: 0.2, agreeableness: 0.1 },
+    acceptedText: ({ target }) => `${target.firstName} ouviu seu pedido de desculpas e reconheceu sua responsabilidade.`,
+    rejectedText: ({ target }) => `${target.firstName} ouviu, mas ainda precisa de tempo antes de acolher o pedido de desculpas.`,
+  },
+  {
+    id: "set_boundary", name: "Estabelecer um limite", category: "relationship", durationMinutes: 30, cooldownMinutes: 360,
+    description: "Explicar com clareza uma necessidade ou comportamento que não será aceito, sem agressão.", visible: relationshipVisibility,
+    eligibility: (context) => context.link ? null : "É preciso existir um vínculo para estabelecer esse limite.",
+    requiresAttention: true, unilateral: true,
+    experienceKind: "limite_interpessoal", tone: "support", valence: 22, importance: 58, effects: EFFECTS.boundary,
+    acceptedText: ({ target }) => `Você explicou seu limite a ${target.firstName} com clareza; a reação poderá amadurecer com o tempo.`,
+  },
+  {
+    id: "provoke", name: "Provocar", category: "hostile", durationMinutes: 12, cooldownMinutes: 180,
+    description: "Cutucar deliberadamente um ponto sensível para obter uma reação negativa.", visible: hostileVisibility,
+    eligibility: hostileReason, unilateral: true,
+    experienceKind: "provocacao", tone: "negative", valence: -52, importance: 48, effects: EFFECTS.provoke,
+    acceptedText: ({ target }) => `Você provocou ${target.firstName} e elevou a tensão entre vocês.`,
+  },
+  {
+    id: "insult", name: "Insultar", category: "hostile", durationMinutes: 10, cooldownMinutes: 360,
+    description: "Atacar verbalmente a pessoa, causando dano direto à confiança e ao respeito.", visible: hostileVisibility,
+    eligibility: hostileReason, unilateral: true,
+    experienceKind: "ofensa_verbal", tone: "negative", valence: -76, importance: 72, effects: EFFECTS.insult,
+    acceptedText: ({ target }) => `Você insultou ${target.firstName}; a ofensa causou ressentimento e afastamento.`,
+  },
+  {
+    id: "intimidate", name: "Intimidar", category: "hostile", durationMinutes: 15, cooldownMinutes: 720,
+    description: "Usar postura e palavras ameaçadoras para causar medo; gera consequências relacionais severas.", visible: hostileVisibility,
+    eligibility: hostileReason, unilateral: true, milestone: true,
+    experienceKind: "intimidacao", tone: "negative", valence: -90, importance: 88, effects: EFFECTS.intimidate,
+    acceptedText: ({ target }) => `Você intimidou ${target.firstName}; a ação abalou profundamente a segurança e a confiança.`,
   },
   {
     id: "argue", name: "Discutir", category: "conflict", durationMinutes: 25, cooldownMinutes: 180,
@@ -362,9 +526,18 @@ const ACTION_DEFINITIONS = [
 const ACTION_ALIASES = Object.freeze({
   conversation: "talk", converse: "talk", socialize: "talk",
   praise: "compliment", help: "support", emotional_support: "support",
+  know_better: "get_to_know", learn_about: "get_to_know", conhecer_melhor: "get_to_know",
+  joke: "tell_joke", tell_a_joke: "tell_joke", piada: "tell_joke",
+  secret: "share_secret", confidence: "share_secret", confidencia: "share_secret",
+  hangout: "hang_out", spend_time: "hang_out", passar_tempo: "hang_out",
+  wellbeing_check: "check_in", ask_how_they_are: "check_in",
+  sorry: "apologize", apology: "apologize", pedir_desculpas: "apologize",
+  boundary: "set_boundary", establish_boundary: "set_boundary", estabelecer_limite: "set_boundary",
+  taunt: "provoke", provocacao: "provoke", offend: "insult", ofender: "insult",
+  threaten: "intimidate", intimidation: "intimidate", intimidacao: "intimidate",
   discuss: "argue", family: "family_chat", family_support: "family_care",
   romantic_date: "date", encontro: "date", carinho: "affection",
-  apologize: "repair", apology: "repair", exclusivity: "define_exclusive",
+  repair_bond: "repair", make_amends: "repair", exclusivity: "define_exclusive",
   define_relationship: "define_dating", dating: "define_dating",
   future_planning: "future_talk", cohabit: "move_in", engagement: "propose",
   wedding: "marry", marriage: "marry", discuss_family: "discuss_children",
@@ -372,7 +545,7 @@ const ACTION_ALIASES = Object.freeze({
   end_relationship: "breakup", separate: "breakup", reconciliation: "reconcile",
 });
 
-export const RELATIONSHIP_ACTIONS_VERSION = 1;
+export const RELATIONSHIP_ACTIONS_VERSION = 2;
 export const relationshipActionCatalog = Object.freeze(ACTION_DEFINITIONS.map((definition) => Object.freeze({
   id: definition.id,
   name: definition.name,

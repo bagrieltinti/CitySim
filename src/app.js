@@ -19,13 +19,16 @@ import { lifeStageForAge } from "./lifeStages.js";
 import { createEntityReferenceLinker } from "./entityReferences.js";
 import { getCityHallSnapshot } from "./municipalProfiles.js";
 import { getRealEstatePortal } from "./realEstateCoordinator.js";
+import { createCityVisuals } from "./cityVisuals.js";
+import { executeMunicipalActionForSimulation, getMunicipalActionsSnapshot } from "./municipalActions.js";
+import { applyUrbanIntervention, getUrbanManagementDashboard, getUrbanTerritorialSnapshot } from "./urbanManagement.js";
 
 let sim = null;
 let gameStarted = false;
 let gameplayController = null;
 let setupResumeSpeed = 0;
 const SPEED_PROFILES = {
-  1: { minutesPerSecond: 1, step: 1, paintInterval: 80, uiInterval: 320, hudInterval: 150, label: "VIDA", detail: "1 dia / 24 min" },
+  1: { minutesPerSecond: 1, step: 1, paintInterval: 16, uiInterval: 320, hudInterval: 100, label: "VIDA", detail: "1 dia / 24 min" },
   24: { minutesPerSecond: 24, step: 2, paintInterval: 25, uiInterval: 260, hudInterval: 80, label: "COTIDIANO", detail: "1 dia / 60 s" },
   96: { minutesPerSecond: 96, step: 5, paintInterval: 25, uiInterval: 240, hudInterval: 65, label: "INTENSO", detail: "1 dia / 15 s" },
 };
@@ -38,6 +41,7 @@ let selected = null,
   frame = 0,
   mapMode = "cidade";
 const camera={panX:0,panY:0,followId:null},mapLayers={buildings:true,people:true,vehicles:true,labels:true,events:true,roads:true};
+const cityVisuals=createCityVisuals({vegetation:{density:.24,spacing:1.7}});
 let citizenFocusId=null,citizenFocusSignature="",focusPlaceId=null;
 const focusViewStates=new Map();
 let renderedFocusViewKey="",lastFocusTimelineRefresh=0,lastFocusPlaceRefresh=0;
@@ -65,6 +69,7 @@ app.insertAdjacentHTML("beforeend", `
           ["⇄", "Mobilidade"],
           ["♢", "Gerações"],
           ["⌁", "Infraestrutura"],
+          ["▥", "Urbanismo"],
           ["✦", "Eventos"],
           ["◉", "Ambiente"],
           ["◆", "Política"],
@@ -79,7 +84,7 @@ app.insertAdjacentHTML("beforeend", `
       <div class="treasury"><small>TESOURO MUNICIPAL</small><strong id="money">R$ 248.600</strong><span>Caixa em tempo real</span></div>
     </aside>
     <section class="world">
-      <div class="toolbar"><div class="search"><span>⌕</span><input id="search" placeholder="Buscar pessoa, família ou lugar..."></div><div class="map-modes"><button class="active" data-map="cidade">Cidade</button><button data-map="transporte">Transporte</button><button data-map="relações">Relações</button><button data-map="infraestrutura">Infra</button><button data-map="ambiente">Ambiente</button></div><button class="round compact-only" id="cityFeedToggle" title="Abrir diário e jornal" aria-label="Abrir diário e jornal">▤</button><div class="layer-control"><button class="round" id="layerToggle" title="Camadas do mapa">☷</button><div class="layer-menu" id="layerMenu">${[["roads","Ruas"],["buildings","Prédios"],["people","Cidadãos"],["vehicles","Veículos"],["labels","Nomes"],["events","Eventos"]].map(([id,label])=>`<label><input type="checkbox" data-layer="${id}" checked>${label}</label>`).join("")}</div></div><button class="round" id="recenter" title="Recentralizar mapa">◎</button><button class="round" id="zoomOut">−</button><button class="round" id="zoomIn">＋</button></div>
+      <div class="toolbar"><div class="search"><span>⌕</span><input id="search" placeholder="Buscar pessoa, família ou lugar..."></div><div class="map-modes"><button class="active" data-map="cidade">Cidade</button><button data-map="urbanismo">Urbanismo</button><button data-map="transporte">Transporte</button><button data-map="relações">Relações</button><button data-map="infraestrutura">Infra</button><button data-map="ambiente">Ambiente</button></div><button class="round compact-only" id="cityFeedToggle" title="Abrir diário e jornal" aria-label="Abrir diário e jornal">▤</button><div class="layer-control"><button class="round" id="layerToggle" title="Camadas do mapa">☷</button><div class="layer-menu" id="layerMenu">${[["roads","Ruas"],["buildings","Prédios"],["people","Cidadãos"],["vehicles","Veículos"],["labels","Nomes"],["events","Eventos"]].map(([id,label])=>`<label><input type="checkbox" data-layer="${id}" checked>${label}</label>`).join("")}</div></div><button class="round" id="recenter" title="Recentralizar mapa">◎</button><button class="round" id="zoomOut">−</button><button class="round" id="zoomIn">＋</button></div>
       <canvas id="cityBase" aria-hidden="true"></canvas><canvas id="city" aria-label="Mapa interativo da cidade"></canvas><div class="day-night-overlay" id="dayNightOverlay" aria-hidden="true"></div><div class="map-zoom-indicator" id="zoomIndicator">100%</div><div class="period" id="period">MANHÃ</div>
       <div class="follow-hud" id="followHud"><button id="stopFollow">×</button><small>ACOMPANHANDO</small><b id="followName"></b><span id="followActivity"></span></div>
       <div class="legend">${venueTypes.map((v) => `<span><i style="background:${v.color}"></i>${v.label}</span>`).join("")}</div>
@@ -99,7 +104,15 @@ app.insertAdjacentHTML("beforeend", `
 const entityReferenceLinker = createEntityReferenceLinker({
   getSimulation: () => sim,
   onOpenPerson: (person) => showPerson(person),
-  onLocatePerson: (person) => { focusMapPoint(person.x, person.y); camera.followId = person.id; draw(); },
+  onLocatePerson: (person) => { focusMapPoint(person.x, person.y); draw(); },
+  onToggleFollow: (person) => {
+    camera.followId = camera.followId === person.id ? null : person.id;
+    if (camera.followId) { camera.panX = 0; camera.panY = 0; }
+    baseMapSignature = "";
+    draw();
+    renderUI();
+  },
+  isFollowing: (person) => camera.followId === person?.id,
   onPerson: (person) => { focusMapPoint(person.x, person.y); showPerson(person); },
   onPlace: (place) => { focusMapPoint(place.x + place.w / 2, place.y + place.h / 2); showBuilding(place); },
 });
@@ -107,6 +120,7 @@ const entityReferenceLinker = createEntityReferenceLinker({
 
 function activateGameWorld(nextSimulation, { mode, view = null, isNew = false } = {}) {
   sim = nextSimulation;
+  cityVisuals.reset(sim);
   entityReferenceLinker.invalidate();
   gameStarted = true;
   lastRunningSpeed = Number(view?.lastRunningSpeed) || (mode === "gameplay" ? 1 : 24);
@@ -122,7 +136,7 @@ function activateGameWorld(nextSimulation, { mode, view = null, isNew = false } 
   camera.panY = Number(view?.camera?.panY) || 0;
   camera.followId = view?.camera?.followId && sim.people.some((person) => person.id === view.camera.followId) ? view.camera.followId : mode === "gameplay" ? sim.playerId : null;
   scale = Math.max(.65, Math.min(2.3, Number(view?.scale) || 1));
-  mapMode = ["cidade", "transporte", "relações", "infraestrutura", "ambiente"].includes(view?.mapMode) ? view.mapMode : "cidade";
+  mapMode = ["cidade", "urbanismo", "transporte", "relações", "infraestrutura", "ambiente"].includes(view?.mapMode) ? view.mapMode : "cidade";
   if (view?.mapLayers) Object.keys(mapLayers).forEach((key) => { if (typeof view.mapLayers[key] === "boolean") mapLayers[key] = view.mapLayers[key]; });
   activeTab = typeof view?.activeTab === "string" ? view.activeTab : "visão geral";
   rightMode = view?.rightMode === "newspaper" ? "newspaper" : "diary";
@@ -206,6 +220,10 @@ gameplayController = createGameplayController({
   onDeleted: ({ mode, slot }) => { if (gameplayController?.mode() === mode && gameplayController?.activeSlot() === slot) updateSaveState("SLOT ATIVO EXCLUÍDO", "warning"); },
   onSaveError: reportSaveError,
   onLoadError: (error) => { reportSaveError(error); updateSaveState("SAVE INVÁLIDO", "error"); },
+  onOpenPerson: (person) => showPerson(person),
+  onLocatePerson: (person) => { focusMapPoint(person.x,person.y); draw(); },
+  onToggleFollow: (person) => { camera.followId=camera.followId===person.id?null:person.id;if(camera.followId){camera.panX=0;camera.panY=0;}baseMapSignature="";draw();renderUI(); },
+  isFollowing: (person) => camera.followId===person?.id,
   onSetupOpen: () => {
     if (!gameStarted) return;
     setupResumeSpeed = sim.speed || lastRunningSpeed;
@@ -251,9 +269,17 @@ function coords() {
   const w = canvas.width / mapPixelRatio,
     h = canvas.height / mapPixelRatio,
     cell=Math.min(w / (sim.city.bounds.width+1), h / (sim.city.bounds.height+1)) * scale,
-    followed=sim.people.find(p=>p.id===camera.followId);
+    followed=sim.people.find(p=>p.id===camera.followId),followedPosition=followed?(cityVisuals.personPosition(followed)||followed):null;
   let ox=(w-cell*sim.city.bounds.width)/2+camera.panX,oy=(h-cell*sim.city.bounds.height)/2+camera.panY;
-  if(followed){ox=w/2-followed.x*cell+camera.panX;oy=h/2-followed.y*cell+camera.panY;}
+  if(followedPosition){
+    ox=w/2-followedPosition.x*cell+camera.panX;
+    oy=h/2-followedPosition.y*cell+camera.panY;
+    // Keep the static city and the followed silhouette on the same sub-pixel
+    // grid. Eighth-pixel steps are visually continuous while avoiding a full
+    // redraw of every facade for imperceptible floating-point changes.
+    ox=Math.round(ox*8)/8;
+    oy=Math.round(oy*8)/8;
+  }
   return {
     w,
     h,
@@ -261,8 +287,9 @@ function coords() {
   };
 }
 function focusMapPoint(x,y){camera.followId=null;const w=canvas.width/mapPixelRatio,h=canvas.height/mapPixelRatio,cell=Math.min(w/(sim.city.bounds.width+1),h/(sim.city.bounds.height+1))*scale,baseX=(w-cell*sim.city.bounds.width)/2,baseY=(h-cell*sim.city.bounds.height)/2;camera.panX=w/2-x*cell-baseX;camera.panY=h/2-y*cell-baseY;baseMapSignature="";draw();}
-function staticMapKey({w,h,cell,ox,oy}){return [Math.round(w),Math.round(h),Math.round(cell*100),Math.round(ox*2),Math.round(oy*2),mapMode,mapLayers.roads,mapLayers.buildings,mapLayers.labels,sim.buildings.length,sim.city.streets.length,sim.transportSystem.routes.length,sim.housingSystem.construction.length,sim.week,sim.day].join("|");}
+function staticMapKey({w,h,cell,ox,oy}){return [Math.round(w),Math.round(h),Math.round(cell*100),Math.round(ox*8),Math.round(oy*8),mapMode,mapLayers.roads,mapLayers.buildings,mapLayers.labels,sim.buildings.length,sim.city.streets.length,sim.transportSystem.routes.length,sim.housingSystem.construction.length,sim.week,sim.day].join("|");}
 function paintMap() {
+  const speedProfile=SPEED_PROFILES[sim.speed||lastRunningSpeed]||SPEED_PROFILES[1],visualFrame=cityVisuals.beginFrame(sim,performance.now(),{tickProgress:Math.max(0,Math.min(1,simulationAccumulator/Math.max(1,speedProfile.step))),speedProfile});
   const { w, h, cell, ox, oy } = coords();
   const nextBaseSignature=staticMapKey({w,h,cell,ox,oy});
   if(nextBaseSignature!==baseMapSignature){
@@ -284,7 +311,7 @@ function paintMap() {
     ctx.textAlign = "left";
     ctx.fillText(d.name.toUpperCase(), ox + d.x * cell + 7, oy + d.y * cell + 14);
   });
-  if(mapLayers.roads){
+  if(false&&mapLayers.roads){
   sim.city.lots.forEach((lot)=>{const planned=!lot.occupied&&!['urbanized','ready','developed'].includes(lot.status||'urbanized');ctx.strokeStyle=planned?"rgba(145,101,48,.42)":"rgba(78,91,81,.17)";ctx.lineWidth=planned?1.2:1;ctx.setLineDash(planned?[3,3]:[]);ctx.strokeRect(ox+lot.x*cell,oy+lot.y*cell,lot.w*cell,lot.h*cell);if(planned){ctx.fillStyle="rgba(214,171,91,.08)";ctx.fillRect(ox+lot.x*cell,oy+lot.y*cell,lot.w*cell,lot.h*cell);}});ctx.setLineDash([]);
   const drawRoad=(street)=>{const asphalt=street.surface==="asfalto",gravel=street.surface==="cascalho",building=!["complete",undefined].includes(street.constructionStatus),width=cell*(street.kind==="avenue"?.5:.39),outer=asphalt?"rgba(68,76,69,.18)":gravel?"rgba(118,92,52,.23)":"rgba(103,68,35,.22)",inner=asphalt?"#a6aaa4":gravel?"#bba77f":"#9a7958";ctx.lineCap="butt";ctx.strokeStyle=outer;ctx.lineWidth=width+Math.max(2,cell*.1);ctx.setLineDash(building?[6,4]:[]);ctx.beginPath();if(street.axis==="v"){ctx.moveTo(ox+street.at*cell,0);ctx.lineTo(ox+street.at*cell,h);}else{ctx.moveTo(0,oy+street.at*cell);ctx.lineTo(w,oy+street.at*cell);}ctx.stroke();ctx.strokeStyle=inner;ctx.lineWidth=width;ctx.stroke();ctx.setLineDash([]);if(asphalt){ctx.strokeStyle="rgba(255,255,255,.58)";ctx.lineWidth=1;ctx.setLineDash([8,9]);ctx.stroke();ctx.setLineDash([]);}if(building){ctx.fillStyle="#7b5129";ctx.font=`700 ${Math.max(7,cell*.16)}px DM Sans`;ctx.fillText(`${Math.round(street.workProgress||0)}%`,street.axis==="v"?ox+street.at*cell+5:Math.max(10,ox+2*cell),street.axis==="v"?Math.max(95,oy+4*cell):oy+street.at*cell-5);}};
   sim.city.streets.forEach(drawRoad);
@@ -300,11 +327,32 @@ function paintMap() {
     ctx.restore();
   });
   }
+  if(mapMode==="ambiente"){
+    sim.city.districts.forEach((d)=>{const metric=sim.environment.districts[d.id],quality=metric?.airQuality||80;ctx.fillStyle=quality>75?"rgba(70,143,91,.24)":quality>50?"rgba(218,172,58,.3)":"rgba(187,72,62,.34)";ctx.fillRect(ox+d.x*cell,oy+d.y*cell,d.w*cell,d.h*cell);ctx.fillStyle="#26372e";ctx.font="700 9px DM Sans";ctx.fillText(`AR ${quality} · RUÍDO ${metric?.noise||0}`,ox+(d.x+d.w/2)*cell,oy+(d.y+d.h/2)*cell);});
+  }
+  if(mapMode==="urbanismo"){
+    const territorial=getUrbanTerritorialSnapshot(sim);
+    territorial.districts.forEach((district)=>{const d=sim.city.districts.find(item=>item.id===district.id);if(!d)return;const index=district.urbanIndex;ctx.fillStyle=index>=72?"rgba(57,133,82,.28)":index>=55?"rgba(215,166,62,.31)":"rgba(179,70,58,.34)";ctx.fillRect(ox+d.x*cell,oy+d.y*cell,d.w*cell,d.h*cell);ctx.strokeStyle="rgba(33,48,40,.38)";ctx.lineWidth=1.5;ctx.strokeRect(ox+d.x*cell+2,oy+d.y*cell+2,d.w*cell-4,d.h*cell-4);ctx.fillStyle="#1f3028";ctx.font=`700 ${Math.max(8,cell*.2)}px DM Sans`;ctx.textAlign="center";ctx.fillText(`${district.name.toUpperCase()} · ÍNDICE ${Math.round(index)}`,ox+(d.x+d.w/2)*cell,oy+(d.y+d.h/2)*cell-3);ctx.font=`600 ${Math.max(7,cell*.15)}px DM Sans`;ctx.fillText(`PRIORIDADE: ${district.priority?.label?.toUpperCase()||"MANUTENÇÃO"}`,ox+(d.x+d.w/2)*cell,oy+(d.y+d.h/2)*cell+9);});
+  }
+  if(mapLayers.roads&&["cidade","urbanismo"].includes(mapMode)){
+    ctx.save();
+    sim.city.lots.forEach((lot)=>{
+      const planned=!lot.occupied&&!['urbanized','ready','developed'].includes(lot.status||'urbanized');
+      ctx.strokeStyle=planned?"rgba(127,83,34,.48)":"rgba(66,79,69,.13)";
+      ctx.lineWidth=planned?1.2:1;
+      ctx.setLineDash(planned?[3,3]:[]);
+      ctx.strokeRect(ox+lot.x*cell,oy+lot.y*cell,lot.w*cell,lot.h*cell);
+      if(planned){ctx.fillStyle="rgba(214,171,91,.1)";ctx.fillRect(ox+lot.x*cell,oy+lot.y*cell,lot.w*cell,lot.h*cell);}
+    });
+    ctx.restore();
+  }
+  cityVisuals.drawStatic(ctx,sim,{w,h,cell,ox,oy},{roads:mapLayers.roads,buildings:mapLayers.buildings,vegetation:mapMode==="cidade",labels:mapLayers.labels,labelLod:1,crosswalks:true});
+  // Operational layers belong above the opaque asphalt and facades.
   if (mapMode === "transporte") {
     sim.transportSystem.routes.forEach((route) => {
       ctx.strokeStyle = route.color;
       ctx.lineWidth = 3;
-      ctx.globalAlpha = .75;
+      ctx.globalAlpha = .8;
       ctx.beginPath();
       route.stops.forEach(([x,y],i)=>i?ctx.lineTo(ox+x*cell,oy+y*cell):ctx.moveTo(ox+x*cell,oy+y*cell));
       ctx.stroke();
@@ -313,21 +361,32 @@ function paintMap() {
     });
   }
   if(mapMode==="infraestrutura"){
-    Object.entries(utilityTypes).forEach(([type,info],index)=>{ctx.strokeStyle=info.color;ctx.globalAlpha=.62;ctx.lineWidth=2;sim.city.streets.forEach((s)=>{ctx.beginPath();if(s.axis==="v"){ctx.moveTo(ox+(s.at-.12+index*.12)*cell,oy+cell);ctx.lineTo(ox+(s.at-.12+index*.12)*cell,oy+(sim.city.bounds.height-1)*cell);}else{ctx.moveTo(ox+cell,oy+(s.at-.12+index*.12)*cell);ctx.lineTo(ox+(sim.city.bounds.width-1)*cell,oy+(s.at-.12+index*.12)*cell);}ctx.stroke();});});ctx.globalAlpha=1;
+    Object.entries(utilityTypes).forEach(([,info],index)=>{ctx.strokeStyle=info.color;ctx.globalAlpha=.72;ctx.lineWidth=2;sim.city.streets.forEach((s)=>{ctx.beginPath();if(s.axis==="v"){ctx.moveTo(ox+(s.at-.12+index*.12)*cell,oy+cell);ctx.lineTo(ox+(s.at-.12+index*.12)*cell,oy+(sim.city.bounds.height-1)*cell);}else{ctx.moveTo(ox+cell,oy+(s.at-.12+index*.12)*cell);ctx.lineTo(ox+(sim.city.bounds.width-1)*cell,oy+(s.at-.12+index*.12)*cell);}ctx.stroke();});});ctx.globalAlpha=1;
     sim.buildings.filter((b)=>!b.meter?.connected).forEach((b)=>{ctx.strokeStyle="#c5423b";ctx.lineWidth=3;ctx.strokeRect(ox+b.x*cell,oy+b.y*cell,b.w*cell,b.h*cell);});
   }
-  if(mapMode==="ambiente"){
-    sim.city.districts.forEach((d)=>{const metric=sim.environment.districts[d.id],quality=metric?.airQuality||80;ctx.fillStyle=quality>75?"rgba(70,143,91,.24)":quality>50?"rgba(218,172,58,.3)":"rgba(187,72,62,.34)";ctx.fillRect(ox+d.x*cell,oy+d.y*cell,d.w*cell,d.h*cell);ctx.fillStyle="#26372e";ctx.font="700 9px DM Sans";ctx.fillText(`AR ${quality} · RUÍDO ${metric?.noise||0}`,ox+(d.x+d.w/2)*cell,oy+(d.y+d.h/2)*cell);});
+  if(mapLayers.labels&&mapLayers.roads&&cell>=4.5){
+    ctx.save();
+    ctx.fillStyle="rgba(37,49,42,.68)";
+    ctx.font=`600 ${Math.max(7,cell*.16)}px DM Sans`;
+    ctx.textAlign="left";
+    sim.city.streets.forEach((street)=>{
+      if(street.axis==="v"){
+        ctx.save();
+        ctx.translate(ox+street.at*cell+Math.max(5,cell*.18),Math.max(86,oy+2.2*cell));
+        ctx.rotate(Math.PI/2);
+        ctx.fillText(street.name,0,0);
+        ctx.restore();
+      }else ctx.fillText(street.name,Math.max(8,ox+1.35*cell),oy+street.at*cell-Math.max(4,cell*.15));
+      if(street.constructionStatus&&!['complete','completed'].includes(street.constructionStatus)){
+        const x=street.axis==="v"?ox+street.at*cell+5:Math.max(10,ox+2*cell),y=street.axis==="v"?Math.max(98,oy+4*cell):oy+street.at*cell-5;
+        ctx.fillStyle="#75491f";
+        ctx.fillText(`${Math.round(street.workProgress||0)}%`,x,y);
+        ctx.fillStyle="rgba(37,49,42,.68)";
+      }
+    });
+    ctx.restore();
   }
-  for (let i = 0; i < 90; i++) {
-    const x = (i * 71) % w,
-      y = (i * 113) % h;
-    ctx.fillStyle = i % 3 ? "#89a677" : "#76996b";
-    ctx.beginPath();
-    ctx.arc(x, y, 2 + (i % 4), 0, 7);
-    ctx.fill();
-  }
-  if(mapLayers.buildings)sim.buildings.forEach((b) => {
+  if(false&&mapLayers.buildings)sim.buildings.forEach((b) => {
     const v = venueByType.get(b.type)||venueTypes[0];
     const x = ox + b.x * cell,
       y = oy + b.y * cell,
@@ -365,7 +424,7 @@ function paintMap() {
   ctx=dynamicCtx;
   ctx.setTransform(mapPixelRatio,0,0,mapPixelRatio,0,0);
   ctx.clearRect(0,0,w,h);
-  if(mapLayers.buildings)sim.buildings.forEach((b)=>{const occupancy=sim.spatialSystem?.occupancy?.[b.id];if(!occupancy?.present)return;const x=ox+b.x*cell,y=oy+b.y*cell,bw=b.w*cell,bh=b.h*cell;if(x+bw<0||y+bh<0||x>w||y>h)return;ctx.fillStyle=occupancy.ratio>1?"#b9453d":"#315d47";ctx.beginPath();ctx.arc(x+bw-5,y+6,Math.min(5,2+occupancy.present*.12),0,7);ctx.fill();});
+  // Ocupação continua disponível nos painéis; os antigos pontos verdes sobre os prédios foram removidos do mapa.
   if (mapMode === "relações") {
     const links = selected
       ? sim.relationships.filter(
@@ -376,6 +435,7 @@ function paintMap() {
       const a = sim.people.find((p) => p.id === r.a),
         b = sim.people.find((p) => p.id === r.b);
       if(!a||!b)return;
+      const aPosition=visualFrame.person(a)||a,bPosition=visualFrame.person(b)||b;
       ctx.strokeStyle =
         r.type === "conflito"
           ? "rgba(177,70,63,.5)"
@@ -385,37 +445,14 @@ function paintMap() {
       ctx.lineWidth = r.type === "casamento" ? 2.5 : 1;
       ctx.setLineDash(r.type === "conflito" ? [3, 4] : []);
       ctx.beginPath();
-      ctx.moveTo(ox + a.x * cell, oy + a.y * cell);
-      ctx.lineTo(ox + b.x * cell, oy + b.y * cell);
+      ctx.moveTo(ox + aPosition.x * cell, oy + aPosition.y * cell);
+      ctx.lineTo(ox + bPosition.x * cell, oy + bPosition.y * cell);
       ctx.stroke();
     });
     ctx.setLineDash([]);
   }
-  const followedRoute=sim.people.find(p=>p.id===camera.followId&&p.alive),followDestination=followedRoute&&sim.buildings.find(b=>b.id===followedRoute.currentAction?.destinationId);if(followedRoute&&followDestination){ctx.strokeStyle="rgba(49,93,71,.7)";ctx.lineWidth=2;ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(ox+followedRoute.x*cell,oy+followedRoute.y*cell);ctx.lineTo(ox+(followDestination.x+followDestination.w/2)*cell,oy+(followDestination.y+followDestination.h/2)*cell);ctx.stroke();ctx.setLineDash([]);ctx.strokeStyle="#d39b3f";ctx.lineWidth=2;ctx.strokeRect(ox+followDestination.x*cell-3,oy+followDestination.y*cell-3,followDestination.w*cell+6,followDestination.h*cell+6);}
-  const mapPeople=mapLayers.people?sim.people.filter(p=>p.alive||p.id===camera.followId):sim.people.filter(p=>p.id===camera.followId);mapPeople.forEach((p) => {
-    const x = ox + p.x * cell,
-      y = oy + p.y * cell;
-    if(x < -10 || y < -10 || x > w + 10 || y > h + 10)return;
-    ctx.fillStyle = "rgba(0,0,0,.15)";
-    ctx.beginPath();
-    ctx.ellipse(x, y + 4, 4, 2, 0, 0, 7);
-    ctx.fill();
-    ctx.fillStyle = p.alive?p.color:"#3c4541";
-    ctx.beginPath();
-    ctx.arc(x, y, 3.6, 0, 7);
-    ctx.fill();
-    if (selected?.id === p.id) {
-      ctx.strokeStyle = "#fff";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(x, y, 7, 0, 7);
-      ctx.stroke();
-    }
-  });
-  if(mapLayers.vehicles){sim.transportSystem.fleet.forEach((id)=>{const bus=sim.vehicles.find((v)=>v.id===id);ctx.fillStyle=sim.transportSystem.routes.find((r)=>r.id===bus.routeId).color;ctx.fillRect(ox+bus.x*cell-5,oy+bus.y*cell-3,10,6);ctx.fillStyle="#fff";ctx.fillRect(ox+bus.x*cell-2,oy+bus.y*cell-2,4,2);});
-  sim.vehicles.filter((v)=>v.use==="delivery"&&v.status==="delivery").forEach((v)=>{ctx.fillStyle="#8b5b35";ctx.fillRect(ox+v.x*cell-5,oy+v.y*cell-3,11,7);ctx.fillStyle="#e7c58d";ctx.fillRect(ox+v.x*cell+2,oy+v.y*cell-2,3,3);});
-  sim.vehicles.filter((v)=>v.use==="taxi"&&["dispatching","taxi_service","active"].includes(v.status)).forEach((v)=>{const active=v.status!=="active";ctx.fillStyle=active?"#d8aa32":"#c7a74d";ctx.fillRect(ox+v.x*cell-4,oy+v.y*cell-2.5,9,5);ctx.fillStyle="#2d342f";ctx.fillRect(ox+v.x*cell-1.5,oy+v.y*cell-3.5,3,2);});}
-  const followedPassenger=sim.people.find(p=>p.id===camera.followId&&p.currentTrip?.phase==="onboard");if(followedPassenger){ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.beginPath();ctx.arc(ox+followedPassenger.x*cell,oy+followedPassenger.y*cell,8,0,7);ctx.stroke();ctx.fillStyle="#d2a958";ctx.beginPath();ctx.arc(ox+followedPassenger.x*cell,oy+followedPassenger.y*cell,2.5,0,7);ctx.fill();}
+  const followedRoute=sim.people.find(p=>p.id===camera.followId&&p.alive),followPosition=followedRoute?(visualFrame.person(followedRoute)||followedRoute):null,followDestination=followedRoute&&sim.buildings.find(b=>b.id===followedRoute.currentAction?.destinationId);if(followPosition&&followDestination){ctx.strokeStyle="rgba(49,93,71,.7)";ctx.lineWidth=2;ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(ox+followPosition.x*cell,oy+followPosition.y*cell);ctx.lineTo(ox+(followDestination.x+followDestination.w/2)*cell,oy+(followDestination.y+followDestination.h/2)*cell);ctx.stroke();ctx.setLineDash([]);ctx.strokeStyle="#d39b3f";ctx.lineWidth=2;ctx.strokeRect(ox+followDestination.x*cell-3,oy+followDestination.y*cell-3,followDestination.w*cell+6,followDestination.h*cell+6);}
+  cityVisuals.drawDynamic(ctx,sim,{w,h,cell,ox,oy},{frame:visualFrame,people:mapLayers.people?true:(camera.followId?[camera.followId]:false),vehicles:mapLayers.vehicles,selectedId:selected?.id||camera.followId,showDeceased:false});
   if(mapLayers.events)sim.events.active.forEach((event)=>{const b=sim.buildings.find((x)=>x.name===event.location);if(!b)return;const pulse=10+Math.sin(sim.minute*.08+(sim.speed?performance.now()*.006:0))*3;ctx.strokeStyle="#d0933e";ctx.lineWidth=2;ctx.beginPath();ctx.arc(ox+(b.x+b.w/2)*cell,oy+(b.y+b.h/2)*cell,pulse,0,7);ctx.stroke();ctx.fillStyle="#7b5521";ctx.font="700 9px DM Sans";ctx.fillText("EVENTO",ox+(b.x+b.w/2)*cell,oy+b.y*cell-6);});
 }
 function draw(){const now=performance.now();if(now-lastMapDraw>=16){lastMapDraw=now;paintMap();return;}if(mapDrawQueued)return;mapDrawQueued=true;requestAnimationFrame((time)=>{mapDrawQueued=false;lastMapDraw=time;paintMap();});}
@@ -709,10 +746,27 @@ function bindMunicipalProfiles(root=document.querySelector("#drawerContent")) {
   root.querySelectorAll("[data-municipal-profile]").forEach(button=>button.onclick=()=>{const person=sim.people.find(item=>item.id===button.dataset.municipalProfile);if(person)showPerson(person);});
   root.querySelectorAll("[data-municipal-locate]").forEach(button=>button.onclick=()=>{const person=sim.people.find(item=>item.id===button.dataset.municipalLocate);if(!person)return;focusMapPoint(person.x,person.y);camera.followId=person.id;document.querySelector("#drawer").classList.remove("open");draw();});
 }
-function showCityHall(building=sim.buildings.find(item=>/prefeit/i.test(item.name))) {
+function appendMunicipalActionCenter(root,building,districtId,feedback="") {
+  const territorial=getUrbanTerritorialSnapshot(sim),targetId=districtId||territorial.districts.sort((a,b)=>(b.priority?.score||0)-(a.priority?.score||0))[0]?.id||sim.city.districts[0]?.id,context={week:sim.week,people:sim.people,city:sim.city,treasury:sim.money,money:sim.money,governance:sim.governance,politics:sim.politics,localGovernment:sim.localGovernment,housingSystem:sim.housingSystem,transportSystem:sim.transportSystem,justiceSystem:sim.justiceSystem,healthSystem:sim.healthSystem,educationSystem:sim.educationSystem,environment:sim.environment,urbanManagement:sim.urbanManagement},snapshot=getMunicipalActionsSnapshot(sim.municipalActions,context,{districtId:targetId});
+  root=root.querySelector("#municipalActionCenter")||root;
+  root.insertAdjacentHTML("beforeend",`<h3>Central de decisões executivas</h3>${feedback?`<div class="civic-feedback">${feedback}</div>`:""}<div class="municipal-action-summary"><span><small>CATÁLOGO</small><b>${snapshot.totals.catalog}</b></span><span><small>DISPONÍVEIS</small><b>${snapshot.totals.available}</b></span><span><small>EM EXECUÇÃO</small><b>${snapshot.totals.active}</b></span><span><small>SALDO LIVRE</small><b>R$ ${Math.round(snapshot.finance.available).toLocaleString("pt-BR")}</b></span></div><div class="municipal-district-target"><small>BAIRRO PRIORITÁRIO PARA AÇÕES TERRITORIAIS</small><div>${territorial.districts.map(district=>`<button class="${district.id===targetId?"active":""}" data-municipal-district="${district.id}">${district.name}<em>${Math.round(district.urbanIndex)}</em></button>`).join("")}</div></div><div class="municipal-action-categories">${snapshot.categories.map(category=>`<section><header><span><small>ÁREA DE DECISÃO</small><b>${category.label}</b></span><em>${category.actions.filter(action=>action.availability.allowed).length}/${category.actions.length}</em></header><div class="municipal-action-grid">${category.actions.map(action=>`<article class="${action.status==="available"?"is-available":action.status==="active"?"is-active":"is-blocked"}"><header><span><small>${action.departmentName.toUpperCase()} · ${action.kind}</small><b>${action.title}</b></span><em>R$ ${Math.round(action.cost).toLocaleString("pt-BR")}</em></header><p>${action.description}</p><div><span>${action.durationWeeks} semana(s)</span><span>${action.expectedEffects.slice(0,2).join(" · ")}</span></div><button data-municipal-action="${action.id}" data-municipal-target="${targetId}" ${action.availability.allowed?"":"disabled"}>${action.status==="active"?`Em execução · ${Math.round(action.active?.progress||0)}%`:action.availability.allowed?"Autorizar ação":action.availability.reason}</button></article>`).join("")}</div></section>`).join("")}</div><h3>Ações e audiências recentes</h3><div class="public-works-list">${snapshot.active.map(action=>`<article><span><b>${action.title}</b><small>${action.districtName||"Toda a cidade"} · ${action.status} · investimento R$ ${Math.round(action.cost).toLocaleString("pt-BR")}</small></span><em>${Math.round(action.progress)}%</em><i><b style="width:${action.progress}%"></b></i></article>`).join("")||"<p>Nenhuma ação executiva adicional em andamento.</p>"}</div><div class="history">${snapshot.history.slice(0,12).map(item=>`<p><b>Semana ${item.week}</b>${item.text}</p>`).join("")||"<p>O novo centro de decisões ainda não possui registros.</p>"}</div><button class="primary" id="openUrbanManagement">Abrir diagnóstico e intervenções urbanas</button>`);
+  root.querySelectorAll(".municipal-action-categories>section").forEach((section,index)=>{
+    const header=section.querySelector(":scope>header"),setExpanded=(expanded)=>{section.classList.toggle("is-collapsed",!expanded);header?.setAttribute("aria-expanded",String(expanded));};
+    if(header){header.setAttribute("role","button");header.setAttribute("tabindex","0");header.onclick=()=>setExpanded(section.classList.contains("is-collapsed"));header.onkeydown=(event)=>{if(["Enter"," "].includes(event.key)){event.preventDefault();header.click();}};}
+    setExpanded(index===0);
+  });
+  root.querySelectorAll("[data-municipal-district]").forEach(button=>button.onclick=()=>showCityHall(building,button.dataset.municipalDistrict));
+  root.querySelectorAll("[data-municipal-action]").forEach(button=>button.onclick=()=>{try{const result=executeMunicipalActionForSimulation(sim,button.dataset.municipalAction,{districtId:button.dataset.municipalTarget});sim.syncMunicipalPublicWorks?.();baseMapSignature="";showCityHall(building,button.dataset.municipalTarget,`${result.action.title} foi autorizada; orçamento, aprovação e cronograma foram atualizados.`);renderUI();}catch(error){showCityHall(building,button.dataset.municipalTarget,error.message||"A ação não pôde ser autorizada.");}});
+  root.querySelector("#openUrbanManagement").onclick=()=>showUrbanDashboard(targetId);
+}
+function showCityHall(building=sim.buildings.find(item=>/prefeit/i.test(item.name)),districtId=null,feedback="") {
   const snapshot=getCityHallSnapshot(sim),roster=snapshot.roster,mandate=snapshot.mandate,cityHall=building||snapshot.cityHall;
   const address=cityHall?.address?formatAddress(cityHall.address):"Endereço institucional",remaining=mandate.endWeek?Math.max(0,mandate.endWeek-sim.week):null;
   openDrawer(`<small>COMPLEXO ADMINISTRATIVO · MANDATO ATUAL</small><h2>${cityHall?.name||"Prefeitura de Vila Esperança"}</h2><p class="muted">${address} · gestão ${mandate.startWeek||"—"}–${mandate.endWeek||"—"}${remaining!=null?` · ${remaining} semana(s) restantes`:""}</p><div class="political-lead"><i style="--party:${roster.mayor?.party?.color||"#557465"}"></i><span><small>PREFEITO(A) EM EXERCÍCIO</small><b>${roster.mayor?.name||"Cargo vago"}</b><em>${roster.mayor?.party?.name||"Sem filiação"} · aprovação ${Math.round(mandate.approval||0)}%</em></span><strong>${roster.mayor?.presenca?.atCityHall?"PRESENTE":"FORA"}<small>na Prefeitura</small></strong></div><div class="stats"><div><small>EQUIPE MUNICIPAL</small><b>${roster.totals.occupied}</b></div><div><small>NA PREFEITURA</small><b>${snapshot.presence.municipalCount}/${snapshot.presence.totalAtCityHall}</b></div><div><small>EM EXPEDIENTE</small><b>${roster.totals.onDuty}</b></div><div><small>FOLHA SEMANAL</small><b>R$ ${Math.round(roster.totals.weeklyPayroll||0).toLocaleString("pt-BR")}</b></div></div><h3>Comando do Executivo</h3><div class="municipal-roster">${municipalProfileCard(roster.mayor)}${municipalProfileCard(roster.deputyMayor)}${roster.internalOffices.map(municipalProfileCard).join("")}</div><h3>Secretarias e servidores do mandato</h3><div class="municipal-departments">${roster.departments.map(department=>`<section><header><span><b>${department.name}</b><small>${department.mission||"Serviço municipal"}</small></span><em>${Math.round(department.performance||0)}%</em></header><div class="municipal-roster">${municipalProfileCard(department.secretary)}${department.civilServants.map(municipalProfileCard).join("")||"<p>Sem servidores vinculados.</p>"}</div><footer>${department.filledPosts}/${department.authorizedPosts||department.filledPosts} cargos preenchidos · ${department.vacancies||0} vaga(s) · fila ${Math.round(department.backlog||0)}</footer></section>`).join("")}</div><h3>Câmara Municipal</h3><div class="municipal-roster">${roster.councilors.map(municipalProfileCard).join("")||"<p>Composição não registrada.</p>"}</div><h3>Quem está na Prefeitura agora</h3><div class="municipal-roster">${snapshot.presence.municipalProfiles.map(municipalProfileCard).join("")||"<p>Nenhuma autoridade ou servidor registrado no prédio neste instante.</p>"}${snapshot.presence.visitors.map(visitor=>{const person=sim.people.find(item=>item.id===visitor.personId);return person?municipalProfileCard({personId:person.id,name:person.name,cargo:person.role,orgao:"Visitante",localizacao:{name:cityHall?.name},presenca:{status:"at_city_hall",atCityHall:true,onDuty:false}}):"";}).join("")}</div><h3>Leis, sessões e decisões</h3><div class="law-list">${snapshot.legislation.proposals.slice(0,8).map(item=>`<article><span><small>${String(item.stage||item.status||"PROJETO").toUpperCase()}</small><b>${item.title}</b><em>${item.summary||"Em análise pela administração"}</em></span><strong>${item.status}</strong></article>`).join("")}${snapshot.legislation.laws.slice(0,8).map(item=>`<article><span><small>LEI MUNICIPAL</small><b>${item.title}</b><em>${item.status}</em></span><strong>${Math.round(item.implementationProgress||0)}%</strong></article>`).join("")||"<p>Sem registros legislativos.</p>"}</div><h3>Obras sob responsabilidade da gestão</h3><div class="public-works-list">${snapshot.publicWorks.map(work=>`<article><span><b>${work.name}</b><small>${work.stage||work.status} · orçamento R$ ${Math.round(work.budget||0).toLocaleString("pt-BR")}</small></span><em>${Math.round(work.progress||0)}%</em><i><b style="width:${work.progress||0}%"></b></i></article>`).join("")||"<p>Nenhuma obra municipal registrada.</p>"}</div><button class="primary" id="openFullPolitics">Abrir política, eleições e aprovação</button>`);
+  const cityHallRoot=document.querySelector("#drawerContent"),municipalCenter=document.createElement("section");
+  municipalCenter.id="municipalActionCenter";
+  cityHallRoot.querySelector(".stats")?.insertAdjacentElement("afterend",municipalCenter);
+  appendMunicipalActionCenter(cityHallRoot,cityHall,districtId,feedback);
   bindMunicipalProfiles();
   document.querySelector("#openFullPolitics").onclick=showPoliticsDashboard;
 }
@@ -860,6 +914,17 @@ function showMarketsDashboard(){
   document.querySelectorAll("[data-market-vehicle]").forEach(x=>x.onclick=()=>showVehicle(sim.vehicles.find(v=>v.id===x.dataset.marketVehicle)));document.querySelectorAll("[data-market-building]").forEach(x=>x.onclick=()=>showBuilding(sim.buildings.find(b=>b.id===x.dataset.marketBuilding)));
 }
 
+const urbanImpactLabels={mobility:"mobilidade",accessibility:"acessibilidade",roadCondition:"vias",sanitationCoverage:"saneamento",lightingCoverage:"iluminação",drainage:"drenagem",green:"áreas verdes",safety:"segurança",healthCoverage:"saúde",educationCoverage:"educação",desirability:"atratividade",housingCapacity:"moradia",publicTransport:"transporte público",pollution:"poluição"};
+function showUrbanDashboard(districtId=null,feedback=""){
+  const initial=getUrbanManagementDashboard(sim,{districtId:districtId||sim.city.districts[0]?.id}),selectedId=initial.selectedDistrictId,selected=initial.territorial.districts.find(district=>district.id===selectedId)||initial.territorial.districts[0],dashboard=selectedId===initial.selectedDistrictId?initial:getUrbanManagementDashboard(sim,{districtId:selectedId});
+  const active=dashboard.portfolio.filter(item=>!["completed","cancelled","orphaned"].includes(item.status));
+  openDrawer(`<small>PLANEJAMENTO E DESENVOLVIMENTO TERRITORIAL</small><h2>Urbanismo de Vila Esperança</h2><p class="muted">Diagnóstico por bairro, prioridades, orçamento e obras com efeitos físicos permanentes</p>${feedback?`<div class="civic-feedback">${feedback}</div>`:""}<div class="urban-overview"><span><small>ÍNDICE URBANO</small><b>${dashboard.territorial.city.urbanIndex}</b></span><span><small>OBRAS ATIVAS</small><b>${dashboard.territorial.city.activeInterventions}</b></span><span><small>ENTREGAS</small><b>${dashboard.territorial.city.completedInterventions}</b></span><span><small>MARGEM LIVRE</small><b>R$ ${Math.round(dashboard.budget.available).toLocaleString("pt-BR")}</b></span></div><h3>Bairros e prioridades</h3><div class="urban-district-selector">${dashboard.territorial.districts.map(district=>`<button class="${district.id===selected.id?"active":""}" data-urban-district="${district.id}"><span><b>${district.name}</b><small>${district.priority?.label||"Manutenção"} · ${district.priority?.severity||"baixa"}</small></span><em>${Math.round(district.urbanIndex)}</em></button>`).join("")}</div><h3>Diagnóstico de ${selected.name}</h3><div class="urban-metric-grid">${[["Mobilidade",selected.metrics.mobility??selected.metrics.roadCondition],["Saneamento",selected.metrics.sanitationCoverage],["Iluminação",selected.metrics.lightingCoverage],["Drenagem",selected.metrics.drainage],["Áreas verdes",selected.metrics.green],["Segurança",selected.metrics.safety],["Saúde",selected.metrics.healthCoverage],["Educação",selected.metrics.educationCoverage],["Atratividade",selected.metrics.desirability]].map(([label,value])=>`<span><small>${label}</small><b>${Math.round(value||0)}%</b><i><b style="width:${Math.max(0,Math.min(100,value||0))}%"></b></i></span>`).join("")}</div><div class="urban-actions-head"><button id="locateUrbanDistrict">Ver bairro no mapa</button><button id="openUrbanCityHall">Abrir Prefeitura</button></div><h3>Intervenções disponíveis · ${selected.name}</h3><div class="municipal-action-grid urban-intervention-grid">${dashboard.interventions.map(action=>`<article class="${action.eligible?"is-available":"is-blocked"}"><header><span><small>${action.categoryLabel.toUpperCase()} · ${action.departmentId}</small><b>${action.name}</b></span><em>${action.display.cost}</em></header><p>${action.description}</p><div><span>${action.display.duration}</span><span>${Object.entries(action.impacts||{}).slice(0,3).map(([key,value])=>`${urbanImpactLabels[key]||key} ${value>0?"+":""}${value}`).join(" · ")}</span></div><button data-urban-action="${action.id}" data-urban-target="${selected.id}" ${action.eligible?"":"disabled"}>${action.eligible?"Autorizar intervenção":action.reasons[0]}</button></article>`).join("")}</div><h3>Carteira de obras urbanas</h3><div class="public-works-list">${active.map(item=>`<article><span><b>${item.name} · ${item.districtName}</b><small>${item.stage} · R$ ${Math.round(item.spent).toLocaleString("pt-BR")} de R$ ${Math.round(item.budget).toLocaleString("pt-BR")} · ${item.remainingWeeks} sem.</small></span><em>${Math.round(item.progress)}%</em><i><b style="width:${item.progress}%"></b></i></article>`).join("")||"<p>Nenhuma intervenção urbana ativa.</p>"}</div>`);
+  document.querySelectorAll("[data-urban-district]").forEach(button=>button.onclick=()=>showUrbanDashboard(button.dataset.urbanDistrict));
+  document.querySelectorAll("[data-urban-action]").forEach(button=>button.onclick=()=>{const result=applyUrbanIntervention(sim,button.dataset.urbanAction,{districtId:button.dataset.urbanTarget});baseMapSignature="";showUrbanDashboard(button.dataset.urbanTarget,result.ok?`${result.intervention.name} foi autorizada e entrou na carteira de obras.`:(result.error||result.evaluation?.reasons?.[0]||"A intervenção não pôde ser autorizada."));renderUI();});
+  document.querySelector("#locateUrbanDistrict").onclick=()=>{const district=sim.city.districts.find(item=>item.id===selected.id);if(!district)return;mapMode="urbanismo";document.querySelectorAll("[data-map]").forEach(button=>button.classList.toggle("active",button.dataset.map===mapMode));focusMapPoint(district.x+district.w/2,district.y+district.h/2);document.querySelector("#drawer").classList.remove("open");baseMapSignature="";draw();};
+  document.querySelector("#openUrbanCityHall").onclick=()=>showCityHall();
+}
+
 function showPoliticsDashboard(){
   const ps=sim.politics.state,local=sim.localGovernment,localSummary=sim.localGovernmentSummary,mayor=ps.officeHolders.mayor,party=ps.parties.find(p=>p.id===mayor?.partyId),election=ps.activeElection,next=Math.max(0,ps.calendar.nextElectionWeek-sim.week),proposals=ps.proposals.slice().reverse().slice(0,12);
   openDrawer(`<small>GOVERNO, POLÍTICA E ELEIÇÕES</small><h2>Prefeitura de Vila Esperança</h2><p class="muted">Mandato ${ps.calendar.term} · fase ${ps.phase} · próxima eleição em ${next} semanas</p><div class="political-lead"><i style="--party:${party?.color||"#557465"}"></i><span><small>PREFEITO(A)</small><b>${mayor?.name||"Gestão interina"}</b><em>${party?.name||"Sem filiação"} · mandato até semana ${mayor?.endWeek||"—"}</em></span><strong>${Math.round(ps.approval.overall)}%<small>aprovação</small></strong></div><div class="stats"><div><small>LEIS APROVADAS</small><b>${ps.statistics.lawsApproved}</b></div><div><small>PROJETOS</small><b>${ps.statistics.proposals}</b></div><div><small>ESCÂNDALOS</small><b>${ps.statistics.scandals}</b></div></div><h3>Aprovação por área</h3><div class="approval-grid">${[["Economia",ps.approval.economy],["Saúde",ps.approval.health],["Educação",ps.approval.education],["Segurança",ps.approval.security],["Mobilidade",ps.approval.mobility],["Integridade",ps.approval.integrity]].map(([n,v])=>`<div><span>${n}<b>${Math.round(v)}%</b></span><i><b style="width:${v}%"></b></i></div>`).join("")}</div><h3>Câmara Municipal · ${ps.council.totalSeats} cadeiras</h3><div class="party-list">${ps.parties.map(p=>`<div><i style="background:${p.color}"></i><span><b>${p.name} (${p.acronym})</b><small>${p.slogan}</small></span><em>${p.seats} cadeira(s) · ${Math.round(p.support)}%</em></div>`).join("")}</div><div class="member-list">${ps.council.members.map(m=>`<button data-politician="${m.personId}"><span><b>${m.name}</b><small>${ps.parties.find(p=>p.id===m.partyId)?.acronym} · ${m.votes} votos · presença ${Math.round(m.attendance)}%</small></span></button>`).join("")}</div>${election?`<h3>Campanha em andamento</h3><div class="focus-alert warning"><b>Eleição na semana ${election.electionWeek}</b><span>${election.candidates.length} candidaturas registradas</span></div>`:""}<h3>Projetos e implementação</h3><div class="proposal-list">${proposals.map(p=>`<div><span><b>${p.name||p.title}</b><small>${p.area||p.category||"Política pública"}</small></span><em>${p.status}</em></div>`).join("")||"<p>Nenhum projeto em tramitação nesta semana.</p>"}</div><h3>Histórico político</h3><div class="history">${ps.history.slice(0,18).map(h=>`<p><b>Semana ${h.week} · ${h.title}</b>${h.text}</p>`).join("")}</div>`);
@@ -968,7 +1033,7 @@ canvas.addEventListener("click", (e) => {
     { cell, ox, oy } = coords(),
     x = (e.clientX - r.left - ox) / cell,
     y = (e.clientY - r.top - oy) / cell;
-  let p = sim.people.find((p) => Math.hypot(p.x - x, p.y - y) < 0.35);
+  const personHit=cityVisuals.hitTestPerson(x,y,{radius:.35,people:mapLayers.people?true:(camera.followId?[camera.followId]:false)}),p=personHit?.person||null;
   if (p) return citizenFocusId?enterCitizenFocus(p):showPerson(p);
   const b = sim.buildings.find(
     (b) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h,
@@ -1042,6 +1107,7 @@ document.querySelectorAll(".nav-item").forEach(
       if (activeTab === "mobilidade") showTransportDashboard();
       if (activeTab === "gerações") showGenerationsDashboard();
       if (activeTab === "infraestrutura") showInfrastructureDashboard();
+      if (activeTab === "urbanismo") showUrbanDashboard();
       if (activeTab === "eventos") showEventsDashboard();
       if (activeTab === "ambiente") showEnvironmentDashboard();
       if (activeTab === "mercados") showMarketsDashboard();

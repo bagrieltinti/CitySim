@@ -92,12 +92,16 @@ import {
 import { createRealEstateDynamics, runRealEstateDynamicsWeek, summarizeRealEstateDynamics } from "./realEstateDynamics.js";
 import { createSimulationPersonPatch, validateCharacterDraft } from "./gameplay.js";
 import { commitCityDevelopment, createCityDevelopmentState, forecastCityDevelopment, planCityDevelopment, stageSummary } from "./cityDevelopment.js";
+import { advanceMunicipalActionsForSimulation, createMunicipalActionsState, normalizeMunicipalActionsState } from "./municipalActions.js";
+import { normalizeUrbanManagementState, synchronizeUrbanManagement } from "./urbanManagement.js";
 import {
   listRelationshipActions,
   normalizeRelationshipActionId,
   relationshipActionById,
   resolveRelationshipAction,
 } from "./relationshipActions.js";
+import { preparePlaceInteraction, resolvePlaceInteraction } from "./placeInteractions.js";
+import { advanceBalancedRiskState, balancedPlayerMortalityChance, GAMEPLAY_DIFFICULTY, selectBalancedCondition } from "./gameplayDifficulty.js";
 
 const pick = (a) => a[Math.floor(Math.random() * a.length)];
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
@@ -294,6 +298,8 @@ export class Simulation {
     if (!simulation.governance || typeof simulation.governance !== "object") throw new TypeError("Governança ausente no snapshot.");
     simulation.governance.politics = simulation.politics.state;
     if (simulation.localGovernment) simulation.governance.localGovernment = simulation.localGovernment;
+    simulation.municipalActions = normalizeMunicipalActionsState(simulation.municipalActions, { week: simulation.week, localGovernment: simulation.localGovernment });
+    simulation.urbanManagement = normalizeUrbanManagementState(simulation.urbanManagement, { week: simulation.week });
     if (simulation.communitySystem?.state) simulation.communityCare = simulation.communitySystem.state;
     if (simulation.realEstateDynamics?.properties) simulation.syncRealEstateValuations();
     simulation.synchronizeWorldState();
@@ -1361,6 +1367,8 @@ export class Simulation {
     this.syncLocalGovernmentAssignments(this.localGovernment.workforce.assignments);
     this.localGovernmentSummary = getLocalGovernmentSummary(this.localGovernment, context);
     this.governance.localGovernment = this.localGovernment;
+    this.municipalActions = createMunicipalActionsState({ week: this.week, localGovernment: this.localGovernment });
+    this.urbanManagement = normalizeUrbanManagementState({}, { week: this.week });
     this.syncMunicipalPublicWorks();
   }
   syncLocalGovernmentAssignments(assignments = []) {
@@ -1476,6 +1484,8 @@ export class Simulation {
     this.applyMunicipalEffects(drained.effects);
     result.newsFacts.forEach((fact) => this.publishMunicipalNews(fact));
     this.syncMunicipalPublicWorks();
+    advanceMunicipalActionsForSimulation(this);
+    synchronizeUrbanManagement(this);
     this.localGovernmentSummary = getLocalGovernmentSummary(this.localGovernment, localGovernmentContextFromSimulation(simulationView));
     this.governance.localGovernment = this.localGovernment;
   }
@@ -3469,9 +3479,9 @@ export class Simulation {
       else if (requestedMode === "bicicleta") mode = "bicicleta";
       else if (requestedMode === "a pé") mode = "a pé";
     }
-    const travelFactor = mode === "carro" || mode === "táxi" ? 2.4 : mode === "ônibus" ? 4.2 : mode === "bicicleta" ? 4.6 : 6.5;
-    const travelBuffer = mode === "ônibus" ? 70 : mode === "táxi" ? 45 : 35;
-    const now=this.absoluteMinute(),priority=p.actionPriority||40,maxTripMinutes=clamp(Math.round(distance*travelFactor+travelBuffer),70,240),travelDeadline=now+maxTripMinutes;
+    const travelFactor = mode === "carro" || mode === "táxi" ? 1.1 : mode === "ônibus" ? 2.8 : mode === "bicicleta" ? 1.6 : 2.8;
+    const travelBuffer = mode === "ônibus" ? 35 : mode === "táxi" ? 18 : 20;
+    const now=this.absoluteMinute(),priority=p.actionPriority||40,maxTripMinutes=clamp(Math.round(distance*travelFactor+travelBuffer),45,180),travelDeadline=now+maxTripMinutes;
     p.currentTrip = { mode, distance, started: this.minute,startedAt:now,elapsedMinutes:0,maxTripMinutes,priority,deadlineAt:Math.max(p.actionDeadlineAt||0,travelDeadline),phase:mode==="ônibus"?"to_stop":mode==="táxi"?"waiting_taxi":"moving",plannedActivity:p.activity,destinationId:destination.buildingId||p.destinationId,destinationName:destination.name||this.buildingIndex?.get(p.destinationId)?.name||"destino" };
     if (mode === "táxi") {
       const request = requestTaxiRide(this.taxiSystem, {
@@ -3502,7 +3512,7 @@ export class Simulation {
         mode = distance > 5 ? "ônibus" : "a pé";
         p.currentTrip.mode = mode;
         p.currentTrip.phase = mode === "ônibus" ? "to_stop" : "moving";
-        p.currentTrip.maxTripMinutes = clamp(Math.round(distance * (mode === "ônibus" ? 4.2 : 6.5) + (mode === "ônibus" ? 70 : 35)), 70, 240);
+        p.currentTrip.maxTripMinutes = clamp(Math.round(distance * 2.8 + (mode === "ônibus" ? 35 : 20)), 45, 180);
         p.currentTrip.deadlineAt = Math.max(p.actionDeadlineAt || 0, now + p.currentTrip.maxTripMinutes);
       }
       this.taxiSummary = summarizeTaxiSystem(this.taxiSystem);
@@ -3545,7 +3555,7 @@ export class Simulation {
     p.mobility.trips++;
     if (this.cityDynamics) this.cityDynamics.tripsStartedToday++;
     p.mobility.commuteMinutes = Math.round(
-      distance * (mode === "carro" || mode === "táxi" ? 1.25 : mode === "ônibus" ? 2.6 : mode === "bicicleta" ? 2.1 : 3.2),
+      distance * (mode === "carro" || mode === "táxi" ? .55 : mode === "ônibus" ? 1.55 : mode === "bicicleta" ? .9 : 1.35),
     ) + (p.currentTrip.waitMinutes || 0);
   }
   absoluteMinute(){return ((this.week-1)*7+this.day)*1440+this.minute;}
@@ -3580,7 +3590,7 @@ export class Simulation {
   }
   fallbackFromTransit(p,reason){
     const trip=p.currentTrip,destination=this.buildingIndex?.get(trip?.destinationId);if(!trip||!destination)return this.abandonTrip(p,reason);
-    const remaining=Math.hypot(destination.x-p.x,destination.y-p.y);trip.mode=this.vehicleOf(p)?"carro":remaining>4?"bicicleta":"a pé";trip.phase="moving";trip.waitFailure=reason;trip.elapsedMinutes=0;trip.maxTripMinutes=clamp(Math.round(remaining*8+40),60,240);p.path=[];p.target=this.accessPoint(destination);p.destinationId=destination.id;trip.deadlineAt=this.absoluteMinute()+trip.maxTripMinutes;
+    const remaining=Math.hypot(destination.x-p.x,destination.y-p.y);trip.mode=this.vehicleOf(p)?"carro":remaining>4?"bicicleta":"a pé";trip.phase="moving";trip.waitFailure=reason;trip.elapsedMinutes=0;trip.maxTripMinutes=clamp(Math.round(remaining*3.2+25),35,180);p.path=[];p.target=this.accessPoint(destination);p.destinationId=destination.id;trip.deadlineAt=this.absoluteMinute()+trip.maxTripMinutes;
   }
   updateTransit(minutes = 10) {
     this.transportSystem.fleet.forEach((id) => {
@@ -3730,6 +3740,22 @@ export class Simulation {
     const result = commandId ? this.setPlayerCommandResult(person, commandId, false, reason) : null;
     return { ok: Boolean(active || travel), result };
   }
+  playerWorkEligibility(person = this.player(), durationMinutes = 120) {
+    const workplace = this.buildings.find((building) => building.name === person?.workplace), business = person ? this.businessOf(person) : null;
+    if (!person?.alive || !person.shift || !workplace || person.locationId !== workplace.id) return { ok: false, reason: "vá ao seu local de trabalho antes de iniciar o expediente", workplace: workplace || null, business };
+    const duration = Math.max(10, Number(durationMinutes) || 120), hour = this.minute / 60, overnight = person.shift.end < person.shift.start;
+    const shiftDay = overnight && hour < person.shift.end ? (this.day + 6) % 7 : this.day;
+    const inShift = person.shift.days?.includes(shiftDay)
+      && (overnight ? hour >= person.shift.start || hour < person.shift.end : hour >= person.shift.start && hour < person.shift.end);
+    const minutesUntilShiftEnd = overnight
+      ? hour >= person.shift.start ? (24 - hour + person.shift.end) * 60 : (person.shift.end - hour) * 60
+      : (person.shift.end - hour) * 60;
+    if (!inShift || duration > minutesUntilShiftEnd + 0.001) return { ok: false, reason: "o expediente precisa caber no dia e horário do seu turno", workplace, business };
+    if (business && !this.isOpen(business)) return { ok: false, reason: `${business.name} está fechado neste horário`, workplace, business };
+    const projectedPayment = roundNumber((person.hourlyWage || 0) * (duration / 60) * (person.playerDevelopment?.bonuses?.wageMultiplier || 1), 2);
+    if (business && Math.max(0, Number(business.cash || 0)) < projectedPayment) return { ok: false, reason: `${business.name} não possui caixa para este expediente`, workplace, business, projectedPayment };
+    return { ok: true, workplace, business, projectedPayment, durationMinutes: duration };
+  }
   startPlayerActivity(type, options = {}) {
     const person = this.player(), place = this.buildings.find((building) => building.id === person?.locationId);
     if (!person?.alive) return { ok: false, reason: "personagem indisponível" };
@@ -3748,23 +3774,49 @@ export class Simulation {
     };
     const definition = definitions[type];
     if (!definition) return { ok: false, reason: "ação desconhecida" };
+    const duration = Math.max(10, Number(options.durationMinutes) || definition.duration), commandId = options.commandId || null;
     if (definition.home && person.locationId !== person.homeId) return { ok: false, reason: "essa ação precisa ser realizada em casa" };
     if (definition.work) {
-      const workplace = this.buildings.find((building) => building.name === person.workplace);
-      const business = this.businessOf(person);
-      if (!person.shift || !workplace || person.locationId !== workplace.id) return { ok: false, reason: "vá ao seu local de trabalho antes de iniciar o expediente" };
-      if (business && !this.isOpen(business)) return { ok: false, reason: `${business.name} está fechado neste horário` };
+      const eligibility = this.playerWorkEligibility(person, duration);
+      if (!eligibility.ok) return { ok: false, reason: eligibility.reason };
     }
     if (definition.study) {
       const institution = this.buildings.find((building) => building.name === person.education?.institution);
       if (!person.education?.enrolled || !institution || person.locationId !== institution.id) return { ok: false, reason: "é necessário estar matriculado e presente na instituição" };
+      const eligibility = this.playerEducationEligibility(person, institution);
+      if (!eligibility.ok) return { ok: false, reason: eligibility.reason };
     }
-    const duration = Math.max(10, Number(options.durationMinutes) || definition.duration), commandId = options.commandId || null;
     person.playerControl.activeAction = { id: commandId || uid("player-action"), commandId, type, label: definition.label, category: definition.category, placeId: place?.id || null, startedAt: this.absoluteMinute(), endsAt: this.absoluteMinute() + duration, durationMinutes: duration, interruptible: true };
     person.activity = definition.label;
     person.activityCategory = definition.category;
     person.actionPriority = 100;
     return { ok: true, action: person.playerControl.activeAction };
+  }
+  playerInteractWithPlace(buildingId, interactionId, options = {}) {
+    const person = this.player(), building = this.buildings.find((candidate) => candidate.id === buildingId);
+    if (!person?.alive || !building) return { ok: false, reason: "local indisponível" };
+    const prepared = preparePlaceInteraction(this, person, building, interactionId);
+    if (!prepared.ok) return prepared;
+    const interaction = prepared.interaction, commandId = options.commandId || null;
+    person.playerControl.activeAction = {
+      id: commandId || uid("player-place"),
+      commandId,
+      type: "place_interaction",
+      interactionId: interaction.id,
+      label: interaction.label,
+      category: "interaction",
+      placeId: building.id,
+      businessId: interaction.businessId || null,
+      cost: interaction.cost || 0,
+      startedAt: this.absoluteMinute(),
+      endsAt: this.absoluteMinute() + interaction.durationMinutes,
+      durationMinutes: interaction.durationMinutes,
+      interruptible: true,
+    };
+    person.activity = interaction.label;
+    person.activityCategory = "interaction";
+    person.actionPriority = 100;
+    return { ok: true, action: person.playerControl.activeAction, interaction };
   }
   updatePlayerControl(person) {
     if (!this.isPlayerControlled(person) || !person.playerControl) return;
@@ -3772,29 +3824,46 @@ export class Simulation {
     if (!action || this.absoluteMinute() < action.endsAt) return;
     let message = `${action.label} foi concluído.`, commandSucceeded = true, resultDetails = { type: action.type, durationMinutes: action.durationMinutes }, relationshipResult = null;
     if (action.type === "work") {
-      const hours = action.durationMinutes / 60, payment = Math.round((person.hourlyWage || 0) * hours * 100) / 100, business = this.businessOf(person);
+      const hours = action.durationMinutes / 60, due = Math.round((person.hourlyWage || 0) * hours * (person.playerDevelopment?.bonuses?.wageMultiplier || 1) * 100) / 100, business = this.businessOf(person);
+      const payment = business ? Math.min(due, Math.max(0, Number(business.cash || 0))) : due;
+      const arrears = Math.max(0, Math.round((due - payment) * 100) / 100);
       person.money += payment;
-      if (business) business.cash -= payment;
-      person.playerControl.workMinutesThisWeek += action.durationMinutes;
-      message = `Expediente concluído: R$ ${payment.toLocaleString("pt-BR")} recebidos.`;
+      if (business) {
+        business.cash = Math.max(0, Number(business.cash || 0) - payment);
+        business.payrollArrears = Math.max(0, Number(business.payrollArrears || 0) + arrears);
+      }
+      if (arrears) {
+        person.playerState ||= {};
+        person.playerState.unpaidWages = Math.max(0, Number(person.playerState.unpaidWages || 0) + arrears);
+      }
+      person.playerControl.workMinutesThisWeek = Number(person.playerControl.workMinutesThisWeek || 0) + action.durationMinutes;
+      resultDetails = { ...resultDetails, payment, wageDue: due, arrears, businessId: business?.id || null };
+      message = arrears
+        ? `Expediente concluído: R$ ${payment.toLocaleString("pt-BR")} recebidos e R$ ${arrears.toLocaleString("pt-BR")} registrados como salário pendente.`
+        : `Expediente concluído: R$ ${payment.toLocaleString("pt-BR")} recebidos.`;
     } else if (action.type === "study") {
       person.playerControl.studyMinutesThisWeek += action.durationMinutes;
-      person.education.performance = clamp(person.education.performance + action.durationMinutes / 100, 0, 100);
+      person.education.performance = clamp(person.education.performance + action.durationMinutes / 100 * (person.playerDevelopment?.bonuses?.learningMultiplier || 1), 0, 100);
       person.education.attendance = clamp(person.education.attendance + 1.2, 0, 100);
       person.education.credits += action.durationMinutes >= 90 ? 1 : 0;
       message = "Sessão de estudos concluída; desempenho e créditos foram atualizados.";
     } else if (action.type === "hygiene") {
-      person.needs.hygiene = clamp(person.needs.hygiene + 48, 0, 100);
+      person.needs.hygiene = clamp(person.needs.hygiene + 48 * (person.playerDevelopment?.bonuses?.recoveryMultiplier || 1), 0, 100);
       message = "Higiene e conforto recuperados.";
     } else if (action.type === "eat") {
-      person.needs.hunger = clamp(person.needs.hunger + 24, 0, 100);
+      person.needs.hunger = clamp(person.needs.hunger + 24 * (person.playerDevelopment?.bonuses?.recoveryMultiplier || 1), 0, 100);
       message = "Refeição concluída; a fome diminuiu.";
     } else if (action.type === "rest") {
-      person.energy = clamp(person.energy + 14, 0, 100);
-      person.needs.comfort = clamp(person.needs.comfort + 12, 0, 100);
+      person.energy = clamp(person.energy + 14 * (person.playerDevelopment?.bonuses?.recoveryMultiplier || 1), 0, 100);
+      person.needs.comfort = clamp(person.needs.comfort + 12 * (person.playerDevelopment?.bonuses?.recoveryMultiplier || 1), 0, 100);
       message = "Descanso concluído; energia e conforto melhoraram.";
     } else if (action.type === "leisure") {
       person.happiness = clamp(person.happiness + 3, 0, 100);
+    } else if (action.type === "place_interaction") {
+      const placeResult = resolvePlaceInteraction(this, person, action);
+      commandSucceeded = placeResult.ok;
+      message = placeResult.message || placeResult.reason || "A atividade no local não pôde ser concluída.";
+      resultDetails = { ...resultDetails, ...(placeResult.details || {}), interactionId: action.interactionId };
     } else if (action.type === "relationship") {
       relationshipResult = this.resolvePlayerRelationshipAction(person, action);
       commandSucceeded = relationshipResult.ok;
@@ -3834,7 +3903,7 @@ export class Simulation {
     // catálogo romântico do próprio casal.
     const isFamily = link?.type === "família" || Boolean(kinship && kinship.kind !== "partner");
     const lifecycle = link && this.isRomanticLink(link) ? this.ensureRelationshipLifecycle(link, actor, target) : null;
-    const compatibility = socialCompatibility(actor, target, link);
+    const compatibility = clamp(socialCompatibility(actor, target, link) + (actor.playerDevelopment?.bonuses?.relationshipAcceptance || 0), 0, 100);
     const defaultAttraction = clamp((compatibility - 25) * .55 + ((target.genetics?.charisma || 50) - 50) * .08, 0, 62);
     const actorView = link?.views?.[actor.id] || { affection: link?.affinity || 0, trust: link?.trust || 0, attraction: lifecycle?.metrics?.attraction || defaultAttraction, resentment: 0 };
     const targetView = link?.views?.[target.id] || { affection: link?.affinity || 0, trust: link?.trust || 0, attraction: lifecycle?.metrics?.attraction || defaultAttraction, resentment: 0 };
@@ -3916,7 +3985,9 @@ export class Simulation {
     const outcome = resolveRelationshipAction(action.relationshipKind, context, Math.random);
     if (!outcome.ok) return fail(outcome.reason || "A interação não pôde ser concluída.");
     const resolvedKind = normalizeRelationshipActionId(action.relationshipKind);
+    const familiarityBefore = Number(link.familiarity || 0);
     applyInteractionEffects(person, target, link, outcome.interaction, { week: this.week, day: this.day, time: this.time, placeId: place?.id || null });
+    if (outcome.interaction.tone === "negative") link.familiarity = familiarityBefore;
     this.applyRelationshipViewEffects(link, person, outcome.effects.actorView);
     this.applyRelationshipViewEffects(link, target, outcome.effects.targetView);
     this.applyRelationshipPersonEffects(person, outcome.effects.actor);
@@ -3950,7 +4021,8 @@ export class Simulation {
       const other = index ? person : target;
       participant.socialInteractionAt = this.absoluteMinute();
       participant.socialContext = { interactionId, counterpartId: other.id, personIds: [participant.id, other.id], placeId: place?.id || null, label: outcome.message, tone: outcome.interaction.tone, sinceWeek: this.week, sinceDay: this.day, sinceMinute: this.minute, expiresAt };
-      participant.actionLog.unshift({ week: this.week, day: this.day, time: this.time, activity: outcome.message, place: place?.name || "Cidade", peopleIds: [other.id], interactionId: outcome.interaction.id });
+      const developmentEligible = outcome.accepted && outcome.interaction.tone !== "negative";
+      participant.actionLog.unshift({ week: this.week, day: this.day, time: this.time, activity: outcome.message, place: place?.name || "Cidade", peopleIds: [other.id], interactionId: developmentEligible ? outcome.interaction.id : null, hostileInteractionId: developmentEligible ? null : outcome.interaction.id, developmentEligible });
       participant.actionLog = participant.actionLog.slice(0, 24);
       this.recordCharacterMemory(participant, { kind: outcome.accepted ? (outcome.interaction.tone === "negative" ? "conflito de relacionamento" : outcome.interaction.tone === "support" ? "apoio e reparo" : "encontro de relacionamento") : "limite interpessoal", summary: outcome.message, actorIds: [other.id], placeId: place?.id || null, valence: outcome.interaction.memory.valence, importance: outcome.interaction.memory.salience, stressImpact: outcome.effects[index ? "target" : "actor"]?.stress || 0, core: Boolean(outcome.interaction.notable), tags: ["player", "relacionamento", resolvedKind] });
       this.queueCharacterEvent(participant, { kind: "social", summary: outcome.message, valence: outcome.interaction.memory.valence, importance: outcome.interaction.memory.salience, stressImpact: outcome.effects[index ? "target" : "actor"]?.stress || 0 });
@@ -4001,14 +4073,55 @@ export class Simulation {
     this.setPlayerCommandResult(person, options.commandId, true, message, { businessId, role: chosenRole });
     return { ok: true, business, role: chosenRole, message };
   }
+  playerEducationEligibility(person, institutionInput) {
+    const institution = typeof institutionInput === "string"
+      ? this.buildings.find((building) => building.id === institutionInput)
+      : institutionInput;
+    if (!person?.alive || !institution || institution.type !== "school") return { ok: false, reason: "instituição educacional indisponível", institution: institution || null, stage: null };
+    const age = Number(person.age || 0), name = String(institution.name || "");
+    if (/creche/i.test(name)) {
+      if (age > 5) return { ok: false, reason: "a creche atende apenas a primeira infância", institution, stage: null };
+      return { ok: true, institution, stage: educationStages.find((entry) => entry.id === "childhood") || stageForAge(age), kind: "early_childhood" };
+    }
+    if (/faculdade|universidade/i.test(name)) {
+      if (age < 18) return { ok: false, reason: "o ensino superior exige idade mínima de 18 anos", institution, stage: null };
+      return { ok: true, institution, stage: educationStages.find((entry) => entry.id === "college"), kind: "college" };
+    }
+    if (/escola/i.test(name)) {
+      if (age < 6 || age >= 18) return { ok: false, reason: "a escola municipal atende estudantes de 6 a 17 anos", institution, stage: null };
+      const stage = stageForAge(age);
+      if (!stage || stage.id === "college") return { ok: false, reason: "não há etapa escolar compatível com a idade", institution, stage: null };
+      return { ok: true, institution, stage, kind: "school" };
+    }
+    const stage = stageForAge(age);
+    return stage
+      ? { ok: true, institution, stage, kind: stage.id === "college" ? "college" : "school" }
+      : { ok: false, reason: "não há formação compatível com a idade nesta instituição", institution, stage: null };
+  }
+  playerHealthcareEligibility(person, institutionInput) {
+    const institution = typeof institutionInput === "string"
+      ? this.buildings.find((building) => building.id === institutionInput)
+      : institutionInput;
+    if (!person?.alive || !institution || institution.type !== "health") return { ok: false, reason: "unidade de saúde indisponível", institution: institution || null, service: null };
+    const name = String(institution.name || "");
+    if (/veterin/i.test(name)) return { ok: false, reason: "a clínica veterinária atende apenas animais", institution, service: "veterinary" };
+    if (/farmácia|farmacia/i.test(name)) return { ok: false, reason: "a farmácia fornece medicamentos, mas não realiza consulta clínica geral", institution, service: "pharmacy" };
+    if (/laboratório|laboratorio/i.test(name)) return { ok: false, reason: "o laboratório realiza exames encaminhados, não consulta clínica geral", institution, service: "laboratory" };
+    if (/caps/i.test(name)) return { ok: true, institution, service: "mental_health" };
+    if (/odontol|dent/i.test(name)) return { ok: true, institution, service: "dental" };
+    if (/hospital|\bubs\b|clínica municipal|clinica municipal|família|familia/i.test(name)) return { ok: true, institution, service: "general" };
+    return { ok: false, reason: "esta unidade não oferece consulta humana geral", institution, service: null };
+  }
   playerEnroll(institutionId, course, options = {}) {
     const person = this.player(), institution = this.buildings.find((building) => building.id === institutionId && building.type === "school");
     if (!person?.alive || !institution || person.locationId !== institution.id) return { ok: false, reason: "vá à instituição para solicitar a matrícula" };
-    const college = institution.name === "Faculdade Municipal";
-    if (college && person.age < 18) return { ok: false, reason: "o ensino superior exige idade mínima de 18 anos" };
-    const stage = college ? educationStages.find((entry) => entry.id === "college") : stageForAge(person.age) || educationStages.find((entry) => entry.id === "secondary");
+    const eligibility = this.playerEducationEligibility(person, institution);
+    if (!eligibility.ok) return { ok: false, reason: eligibility.reason };
+    const stage = eligibility.stage, college = eligibility.kind === "college";
+    if (!stage) return { ok: false, reason: "etapa educacional indisponível" };
     person.education ||= emptyEducation();
     Object.assign(person.education, { stage: stage.id, institution: institution.name, course: college ? (courses.includes(course) ? course : courses[0]) : null, enrolled: true, attendance: Math.max(70, person.education.attendance || 100), performance: person.education.performance || 50 });
+    person.education.history ||= [];
     person.education.history.unshift({ week: this.week, text: `Matriculou-se em ${stage.name}${college ? ` · ${person.education.course}` : ""}.` });
     if (!person.shift) { person.role = "Estudante"; person.workplace = institution.name; }
     person.routine = buildRoutine(person);
@@ -4020,13 +4133,30 @@ export class Simulation {
     const person = this.player(), institution = this.buildings.find((building) => building.id === institutionId && building.type === "health");
     if (!person?.alive || !institution || person.locationId !== institution.id) return { ok: false, reason: "vá a uma unidade de saúde para solicitar atendimento" };
     if (person.currentTrip) return { ok: false, reason: "conclua o deslocamento antes do atendimento" };
-    const active = person.medical.conditions.slice().sort((a, b) => b.severity - a.severity)[0], condition = active && conditionById(active.id);
+    const eligibility = this.playerHealthcareEligibility(person, institution);
+    if (!eligibility.ok) return { ok: false, reason: eligibility.reason };
+    const relevantConditions = person.medical.conditions.filter((activeCondition) => {
+      const definition = conditionById(activeCondition.id);
+      if (eligibility.service === "mental_health") return definition?.kind === "mental";
+      if (eligibility.service === "dental") return activeCondition.id === "dental_infection";
+      return true;
+    });
+    const active = relevantConditions.slice().sort((a, b) => b.severity - a.severity)[0], condition = active && conditionById(active.id);
     let message;
     if (!active) {
       person.medical.visits++;
-      person.health = clamp(person.health + 3, 0, 100);
-      message = `Avaliação preventiva concluída em ${institution.name}; nenhum quadro ativo foi identificado.`;
-    } else if (active.severity >= 55 && institution.name === "Hospital São Lucas") {
+      if (eligibility.service === "mental_health") {
+        person.medical.mentalHealth = clamp(Number(person.medical.mentalHealth || 0) + 5, 0, 100);
+        person.medical.therapySessions = Number(person.medical.therapySessions || 0) + 1;
+        message = `Acolhimento em saúde mental concluído em ${institution.name}; nenhum quadro mental ativo exigiu intervenção adicional.`;
+      } else if (eligibility.service === "dental") {
+        person.health = clamp(person.health + 1, 0, 100);
+        message = `Avaliação odontológica preventiva concluída em ${institution.name}.`;
+      } else {
+        person.health = clamp(person.health + 3, 0, 100);
+        message = `Avaliação preventiva concluída em ${institution.name}; nenhum quadro ativo foi identificado.`;
+      }
+    } else if (active.severity >= 55 && eligibility.service === "general" && /hospital/i.test(institution.name)) {
       const visitsBefore = person.medical.visits;
       this.admit(person, condition || { id: active.id, name: active.id, treatment: "Observação clínica", severity: active.severity });
       if (!person.medical.admitted) person.medical.visits = visitsBefore + 1;
@@ -4034,7 +4164,8 @@ export class Simulation {
     } else {
       person.medical.visits++;
       active.severity = clamp(active.severity - 9, 0, 100);
-      person.health = clamp(person.health + 6, 0, 100);
+      if (eligibility.service === "mental_health") person.medical.mentalHealth = clamp(Number(person.medical.mentalHealth || 0) + 8, 0, 100);
+      else person.health = clamp(person.health + (eligibility.service === "dental" ? 3 : 6), 0, 100);
       message = `Consulta realizada por ${condition?.name || active.id}; o tratamento foi atualizado.`;
     }
     person.medical.history.unshift({ week: this.week, text: message });
@@ -6639,17 +6770,24 @@ export class Simulation {
       this.fillPrescription(p);
       this.updateMentalHealth(p);
       if (p.medical.admitted && burden < 38) this.discharge(p);
-      if (Math.random() < healthRisk(p) * 0.035) {
+      if (Math.random() < healthRisk(p) * 0.035 * (this.isPlayerControlled(p) ? GAMEPLAY_DIFFICULTY.playerIncidenceMultiplier : 1)) {
         const pool = conditions.filter(
           (c) => c.kind !== "crônica" || p.age > 35,
         );
-        this.addCondition(p, pool[Math.floor(Math.random() * pool.length)].id);
+        const selectedCondition = this.isPlayerControlled(p)
+          ? selectBalancedCondition(p, pool)
+          : pool[Math.floor(Math.random() * pool.length)] || null;
+        if (selectedCondition) this.addCondition(p, selectedCondition.id);
       }
-      const mortality =
+      let mortality =
         (p.age > 82 ? (p.age - 80) * 0.00018 : 0) +
         (p.health < 20 ? 0.005 : 0) +
         (burden > 70 ? 0.0028 : 0) +
         (p.medical.conditions.some((a) => a.id === "heart_disease") ? 0.0008 : 0);
+      if (this.isPlayerControlled(p)) {
+        const riskState = advanceBalancedRiskState(p, burden, { week: this.week, day: this.day });
+        mortality = balancedPlayerMortalityChance(mortality, p, riskState);
+      }
       if (Math.random() < mortality) {
         const primary = p.medical.conditions.slice().sort((a, b) => b.severity - a.severity)[0];
         this.die(
@@ -8176,12 +8314,12 @@ export class Simulation {
             congestion = 1 + this.congestionAt(p),
             base =
               p.currentTrip?.mode === "carro" || p.currentTrip?.mode === "táxi"
-                ? 18
+                ? 28
                 : p.currentTrip?.mode === "ônibus"
-                  ? 3.2
+                  ? 7.5
                   : p.currentTrip?.mode === "bicicleta"
-                    ? 6.5
-                    : 3.2,
+                    ? 11
+                    : 7.5,
             mobilitySpeed =
               (base * (minutes / 10) * this.environment.current.mobilityFactor) /
               congestion,
