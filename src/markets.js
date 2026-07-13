@@ -14,6 +14,13 @@ const pick = (items, rng = Math.random) => items[Math.floor(rng() * items.length
 
 export const MARKET_STATE_VERSION = 1;
 
+export const MARKET_COLLECTION_LIMITS = Object.freeze({
+  listings: 480,
+  contracts: 360,
+  transactions: 360,
+  actorHistory: 160,
+});
+
 export const vehicleMarketCatalog = [
   { id: "moto-urbana", model: "Brisa 160", type: "moto", price: 18600, seats: 2, efficiency: 31, annualDepreciation: .13, rentalDay: 78, segment: "popular" },
   { id: "scooter-eletrica", model: "Lume E2", type: "moto elétrica", price: 24400, seats: 2, efficiency: 48, annualDepreciation: .15, rentalDay: 92, segment: "elétrico" },
@@ -181,6 +188,110 @@ function findPerson(ctx, id) {
   return asArray(ctx?.people).find((person) => person.id === id);
 }
 
+function findFamilyForPerson(ctx, person) {
+  if (!person) return null;
+  const directId = person.householdId || person.familyId;
+  return findFamily(ctx, directId)
+    || asArray(ctx?.families).find((family) => asArray(family.memberIds).includes(person.id))
+    || null;
+}
+
+function householdMemberIds(ctx, family) {
+  return new Set([
+    ...asArray(family?.memberIds),
+    ...asArray(ctx?.people)
+      .filter((member) => family && (member.householdId || member.familyId) === family.id)
+      .map((member) => member.id),
+  ]);
+}
+
+function livingHouseholdMembers(ctx, family) {
+  return [...householdMemberIds(ctx, family)]
+    .map((memberId) => findPerson(ctx, memberId))
+    .filter((member) => member && member.alive !== false);
+}
+
+function householdPropertyOccupancy(ctx, family, building) {
+  const memberIds = householdMemberIds(ctx, family);
+  const members = livingHouseholdMembers(ctx, family);
+  const currentHouseholdResidents = members.filter((member) => member.homeId === building?.id).length;
+  const otherResidents = asArray(ctx?.people).filter(
+    (person) => person.alive !== false && person.homeId === building?.id && !memberIds.has(person.id),
+  );
+  const householdRefs = new Set([family?.id, ...memberIds].filter(Boolean));
+  const otherOccupancyRefs = [...new Set([
+    building?.property?.occupiedById,
+    ...asArray(building?.property?.occupiedByIds),
+  ].filter((occupantId) => occupantId && !householdRefs.has(occupantId)))];
+  const reportedOtherResidents = Math.max(0, Number(building?.occupied || 0) - currentHouseholdResidents);
+  return {
+    memberIds,
+    members,
+    otherResidents,
+    otherOccupancyRefs,
+    otherResidentLoad: Math.max(otherResidents.length, reportedOtherResidents, otherOccupancyRefs.length),
+  };
+}
+
+function householdFitsProperty(ctx, family, building) {
+  if (!family || !building) return false;
+  const occupancy = householdPropertyOccupancy(ctx, family, building);
+  return !Number.isFinite(Number(building.capacity))
+    || occupancy.otherResidentLoad + occupancy.members.length <= Number(building.capacity);
+}
+
+function householdCanTakeExclusivePossession(ctx, family, building) {
+  if (!householdFitsProperty(ctx, family, building)) return false;
+  const occupancy = householdPropertyOccupancy(ctx, family, building);
+  return occupancy.otherResidentLoad === 0 && occupancy.otherOccupancyRefs.length === 0;
+}
+
+/**
+ * Renda mensal recorrente baseada nos campos efetivamente usados pela
+ * simulação. `salary` não faz parte do modelo de Person e, por isso, não deve
+ * decidir aprovação de crédito.
+ */
+export function personMonthlyIncome(person = {}) {
+  const explicit = Number(person.monthlyIncome ?? person.income);
+  if (Number.isFinite(explicit) && explicit > 0) return roundMoney(explicit);
+  const hourlyWage = Number(person.hourlyWage ?? person.wage ?? 0);
+  const weeklyHours = Number(person.shift?.hours ?? person.weeklyHours ?? 0);
+  const employmentIncome = Number.isFinite(hourlyWage) && Number.isFinite(weeklyHours)
+    ? Math.max(0, hourlyWage) * Math.max(0, weeklyHours) * 52 / 12
+    : 0;
+  const pension = Number(
+    person.lifeCourse?.retirement?.monthlyPension
+      ?? person.retirement?.monthlyPension
+      ?? person.monthlyPension
+      ?? 0,
+  );
+  const benefits = Number(person.benefits?.monthly ?? person.monthlyBenefits ?? 0);
+  return roundMoney(
+    employmentIncome
+      + (Number.isFinite(pension) ? Math.max(0, pension) : 0)
+      + (Number.isFinite(benefits) ? Math.max(0, benefits) : 0),
+  );
+}
+
+/** Resolve pessoa ou família e soma somente integrantes vivos do domicílio. */
+export function householdMonthlyIncome(ctx, familyOrActor) {
+  const id = typeof familyOrActor === "object" ? familyOrActor?.id : familyOrActor;
+  const person = findPerson(ctx, id) || (familyOrActor && !familyOrActor.memberIds ? familyOrActor : null);
+  const family = findFamily(ctx, id)
+    || (familyOrActor?.memberIds ? familyOrActor : null)
+    || findFamilyForPerson(ctx, person);
+  if (!family) return person ? personMonthlyIncome(person) : 0;
+  const explicit = Number(family.monthlyIncome ?? family.income);
+  if (Number.isFinite(explicit) && explicit > 0) return roundMoney(explicit);
+  const memberIds = householdMemberIds(ctx, family);
+  return roundMoney(
+    [...memberIds]
+      .map((memberId) => findPerson(ctx, memberId))
+      .filter((member) => member && member.alive !== false)
+      .reduce((total, member) => total + personMonthlyIncome(member), 0),
+  );
+}
+
 function resolveActor(ctx, state, id) {
   if (!id) return null;
   const person = findPerson(ctx, id);
@@ -281,6 +392,28 @@ export function createMarketsState(ctx = {}) {
   return state;
 }
 
+export function trimMarketCollections(state) {
+  if (!state) return state;
+  const trim = (entries, limit) => {
+    const source = asArray(entries);
+    if (source.length <= limit) return source;
+    const active = source.filter((entry) => entry?.status === "active");
+    const closed = source.filter((entry) => entry?.status !== "active");
+    return [...active, ...closed].slice(0, limit);
+  };
+  if (state.vehicle) {
+    state.vehicle.listings = trim(state.vehicle.listings, MARKET_COLLECTION_LIMITS.listings);
+    state.vehicle.contracts = trim(state.vehicle.contracts, MARKET_COLLECTION_LIMITS.contracts);
+    state.vehicle.transactions = asArray(state.vehicle.transactions).slice(0, MARKET_COLLECTION_LIMITS.transactions);
+  }
+  if (state.realEstate) {
+    state.realEstate.listings = trim(state.realEstate.listings, MARKET_COLLECTION_LIMITS.listings);
+    state.realEstate.contracts = trim(state.realEstate.contracts, MARKET_COLLECTION_LIMITS.contracts);
+    state.realEstate.transactions = asArray(state.realEstate.transactions).slice(0, MARKET_COLLECTION_LIMITS.transactions);
+  }
+  return state;
+}
+
 export function ensureMarketsState(ctx, state) {
   const result = state || createMarketsState(ctx);
   result.version ||= MARKET_STATE_VERSION;
@@ -297,7 +430,7 @@ export function ensureMarketsState(ctx, state) {
   result.familyBusiness.profiles = asArray(result.familyBusiness.profiles);
   result.familyBusiness.decisions = asArray(result.familyBusiness.decisions);
   result.familyBusiness.expansionProjects = asArray(result.familyBusiness.expansionProjects);
-  return result;
+  return trimMarketCollections(result);
 }
 
 export function estimateVehicleValue(vehicle, options = {}) {
@@ -414,7 +547,7 @@ export function quoteVehicleFinancing(ctx, stateInput, buyerId, price, options =
   const actor = resolveActor(ctx, state, buyerId);
   if (!actor) return failure("Comprador não encontrado.", "buyer_not_found");
   const person = actor.kind === "person" ? actor.entity : null;
-  const family = person ? findFamily(ctx, person.familyId) : actor.kind === "family" ? actor.entity : null;
+  const family = person ? findFamilyForPerson(ctx, person) : actor.kind === "family" ? actor.entity : null;
   const creditScore = Number(options.creditScore || family?.creditScore || person?.creditScore || 620);
   const downRate = clamp(Number(options.downPaymentRate ?? vehicleMarketRules.standardDownPayment), vehicleMarketRules.minimumDownPayment, .9);
   const months = clamp(Math.round(options.months || 48), 6, vehicleMarketRules.maximumFinanceMonths);
@@ -425,8 +558,11 @@ export function quoteVehicleFinancing(ctx, stateInput, buyerId, price, options =
   const monthlyRate = annualRate / 12;
   const monthlyPayment = roundMoney(principal * (monthlyRate * Math.pow(1 + monthlyRate, months)) / Math.max(.0001, Math.pow(1 + monthlyRate, months) - 1));
   const weeklyPayment = roundMoney(monthlyPayment * 12 / 52);
-  const estimatedIncome = person?.salary || (family ? asArray(family.memberIds).reduce((sum, id) => sum + (findPerson(ctx, id)?.salary || 0), 0) : 0);
-  const approved = creditScore >= 390 && actorBalance(ctx, state, buyerId) >= downPayment && (estimatedIncome <= 0 || monthlyPayment <= estimatedIncome * .38);
+  const estimatedIncome = family ? householdMonthlyIncome(ctx, family) : personMonthlyIncome(person);
+  const approved = creditScore >= 390
+    && actorBalance(ctx, state, buyerId) >= downPayment
+    && estimatedIncome > 0
+    && monthlyPayment <= estimatedIncome * .38;
   return success({ approved, price: roundMoney(price), downPayment, principal, annualRate, months, monthlyPayment, weeklyPayment, creditScore });
 }
 
@@ -693,6 +829,10 @@ export function ensurePropertyMetadata(building, index = 0) {
     ownerKind: building.property.ownerKind || (building.ownerId ? "person" : "unassigned"),
     ownerId: building.property.ownerId || building.ownerFamilyId || building.ownerId || null,
     occupiedById: building.property.occupiedById || null,
+    occupiedByIds: [...new Set([
+      ...asArray(building.property.occupiedByIds),
+      building.property.occupiedById,
+    ].filter(Boolean))].slice(0, 240),
     listingId: building.property.listingId || null,
     vacancyWeeks: building.property.vacancyWeeks || 0,
     improvements: asArray(building.property.improvements),
@@ -724,6 +864,37 @@ export function estimatePropertyRent(building, stateInput, options = {}) {
   return Math.max(280, Math.round(value * type.rentYield * ((state.realEstate.rentIndex || 100) / 100)));
 }
 
+function propertyRentalAvailability(ctx, building) {
+  const type = propertyCatalogEntry(building);
+  const residential = type.use.startsWith("residencial");
+  const actualResidents = asArray(ctx?.people).filter((person) => person.alive !== false && person.homeId === building?.id).length;
+  const occupied = Math.max(actualResidents, Number(building?.occupied || 0));
+  const capacity = Number.isFinite(Number(building?.capacity)) ? Math.max(0, Number(building.capacity)) : null;
+  const availableCapacity = capacity === null ? Number(!occupied) : Math.max(0, capacity - occupied);
+  const analytical = asArray(ctx?.realEstateDynamics?.properties).find(
+    (property) => property.buildingId === building?.id || property.id === building?.id,
+  );
+  const totalUnits = Math.max(1, Math.round(Number(analytical?.units ?? building?.units ?? 1) || 1));
+  const analyticalVacancies = Math.max(0, Math.round(Number(
+    analytical?.vacantUnits ?? Math.max(0, totalUnits - Number(analytical?.occupiedUnits || 0)),
+  ) || 0));
+  const availableUnits = Math.max(availableCapacity > 0 ? 1 : 0, analyticalVacancies);
+  const unitCapacity = availableCapacity > 0
+    ? Math.max(1, Math.floor(availableCapacity / Math.max(1, analyticalVacancies || 1)))
+    : 0;
+  return {
+    residential,
+    rentable: residential ? availableCapacity > 0 : occupied === 0,
+    occupied,
+    capacity,
+    availableCapacity,
+    totalUnits,
+    availableUnits,
+    unitCapacity,
+    mode: occupied > 0 ? (totalUnits > 1 ? "unit" : "shared_unit") : (totalUnits > 1 ? "unit" : "whole_property"),
+  };
+}
+
 function selectAgency(state, building, kind) {
   const commercial = !propertyCatalogEntry(building).use.startsWith("residencial");
   return state.realEstate.agencies
@@ -739,13 +910,29 @@ export function createPropertyListing(ctx, stateInput, buildingId, options = {})
   const metadata = ensurePropertyMetadata(building);
   if (state.realEstate.listings.some((item) => item.buildingId === buildingId && item.status === "active")) return failure("O imóvel já possui anúncio ativo.", "already_listed");
   const kind = options.kind === "rent" ? "rent" : "sale";
-  if (kind === "rent" && (metadata.occupiedById || building.occupied > 0) && !options.allowOccupied) return failure("O imóvel precisa estar vago antes de ser anunciado para locação.", "property_occupied");
+  const rentalAvailability = propertyRentalAvailability(ctx, building);
+  if (kind === "rent" && !rentalAvailability.rentable && !options.allowOccupied)
+    return failure("O imóvel não possui unidade ou capacidade residencial vaga para locação.", "property_occupied");
   const agency = state.realEstate.agencies.find((item) => item.id === options.agencyId) || selectAgency(state, building, kind);
-  const price = roundMoney(options.price || (kind === "sale" ? estimatePropertyValue(building, state, options) : estimatePropertyRent(building, state, options)));
+  const estimatedRent = estimatePropertyRent(building, state, options);
+  const occupiedRentFactor = rentalAvailability.occupied > 0
+    ? rentalAvailability.totalUnits > 1
+      ? 1 / rentalAvailability.totalUnits
+      : clamp(rentalAvailability.availableCapacity / Math.max(1, rentalAvailability.capacity || rentalAvailability.availableCapacity), .3, .7)
+    : 1;
+  const price = roundMoney(options.price || (kind === "sale" ? estimatePropertyValue(building, state, options) : estimatedRent * occupiedRentFactor));
   const listing = {
     id: marketId(state, "property-listing"), buildingId, sellerId: options.sellerId || metadata.ownerId || building.ownerFamilyId || building.ownerId || "municipality",
     agencyId: agency?.id || null, kind, price, negotiable: options.negotiable !== false,
     occupied: Boolean(metadata.occupiedById || building.occupied > 0), furnished: metadata.furnished,
+    rentalUnit: kind === "rent" ? {
+      mode: rentalAvailability.mode,
+      capacity: rentalAvailability.unitCapacity,
+      availableCapacityAtListing: rentalAvailability.availableCapacity,
+      availableUnitsAtListing: rentalAvailability.availableUnits,
+      totalUnits: rentalAvailability.totalUnits,
+      shared: rentalAvailability.occupied > 0,
+    } : null,
     status: "active", applications: [], offers: [], views: 0, created: timeStamp(ctx),
     expiresWeek: (ctx.week || 1) + (options.durationWeeks || realEstateMarketRules.defaultListingWeeks),
   };
@@ -799,10 +986,8 @@ export function applyForPropertyRental(ctx, stateInput, listingId, tenantId, opt
   if (listing.applications.some((item) => item.tenantId === tenantId && item.status === "pending")) return failure("Já existe uma candidatura pendente.", "duplicate_application");
   const actor = resolveActor(ctx, state, tenantId);
   if (!actor) return failure("Locatário não encontrado.", "tenant_not_found");
-  const family = actor.kind === "family" ? actor.entity : findFamily(ctx, actor.entity.familyId);
-  const income = family
-    ? asArray(family.memberIds).reduce((sum, id) => sum + (findPerson(ctx, id)?.salary || 0), 0)
-    : actor.entity.salary || 0;
+  const family = actor.kind === "family" ? actor.entity : findFamilyForPerson(ctx, actor.entity);
+  const income = family ? householdMonthlyIncome(ctx, family) : personMonthlyIncome(actor.entity);
   const monthlyDebt = Number(options.monthlyDebt || family?.monthlyDebt || 0);
   const ratio = income > 0 ? (listing.price + monthlyDebt) / income : 1;
   const creditScore = Number(options.creditScore || family?.creditScore || actor.entity.creditScore || 600);
@@ -846,7 +1031,7 @@ export function quoteMortgage(ctx, stateInput, buyerId, price, options = {}) {
   const state = ensureMarketsState(ctx, stateInput);
   const actor = resolveActor(ctx, state, buyerId);
   if (!actor) return failure("Comprador não encontrado.", "buyer_not_found");
-  const family = actor.kind === "family" ? actor.entity : findFamily(ctx, actor.entity.familyId);
+  const family = actor.kind === "family" ? actor.entity : findFamilyForPerson(ctx, actor.entity);
   const creditScore = Number(options.creditScore || family?.creditScore || actor.entity.creditScore || 620);
   const downRate = clamp(Number(options.downPaymentRate ?? realEstateMarketRules.standardDownPayment), realEstateMarketRules.minimumDownPayment, .85);
   const months = clamp(Math.round(options.months || 240), 24, realEstateMarketRules.maximumMortgageMonths);
@@ -857,8 +1042,11 @@ export function quoteMortgage(ctx, stateInput, buyerId, price, options = {}) {
   const monthlyRate = annualRate / 12;
   const monthlyPayment = roundMoney(principal * (monthlyRate * Math.pow(1 + monthlyRate, months)) / Math.max(.0001, Math.pow(1 + monthlyRate, months) - 1));
   const weeklyPayment = roundMoney(monthlyPayment * 12 / 52);
-  const familyIncome = family ? asArray(family.memberIds).reduce((sum, id) => sum + (findPerson(ctx, id)?.salary || 0), 0) : actor.entity.salary || 0;
-  const approved = creditScore >= 420 && actorBalance(ctx, state, buyerId) >= downPayment && (familyIncome <= 0 || monthlyPayment <= familyIncome * .34);
+  const familyIncome = family ? householdMonthlyIncome(ctx, family) : personMonthlyIncome(actor.entity);
+  const approved = creditScore >= 420
+    && actorBalance(ctx, state, buyerId) >= downPayment
+    && familyIncome > 0
+    && monthlyPayment <= familyIncome * .34;
   return success({ approved, price: roundMoney(price), downPayment, principal, annualRate, months, monthlyPayment, weeklyPayment, creditScore });
 }
 
@@ -885,22 +1073,83 @@ export function moveFamilyIntoProperty(ctx, familyId, buildingId, tenure = "owne
   if (!family || !building) return false;
   const metadata = ensurePropertyMetadata(building);
   const previous = findBuilding(ctx, family.homeId);
-  if (previous && previous.id !== building.id) {
-    previous.occupied = Math.max(0, (previous.occupied || 0) - asArray(family.memberIds).length);
-    if (previous.property?.occupiedById === family.id) previous.property.occupiedById = null;
+  const memberIds = householdMemberIds(ctx, family);
+  const members = livingHouseholdMembers(ctx, family);
+  if (!householdFitsProperty(ctx, family, building)) return false;
+  const moved = Boolean(previous && previous.id !== building.id);
+  const existingTargetHouseholds = asArray(ctx?.people)
+    .filter((person) => person.alive !== false && person.homeId === building.id && !memberIds.has(person.id))
+    .map((person) => person.householdId || person.familyId)
+    .filter(Boolean);
+  if (moved && previous.property) {
+    const previousOccupants = asArray(previous.property.occupiedByIds).filter((id) => id !== family.id);
+    if (previous.property.occupiedById && previous.property.occupiedById !== family.id) previousOccupants.unshift(previous.property.occupiedById);
+    previous.property.occupiedByIds = [...new Set(previousOccupants)].slice(0, 240);
+    if (previous.property.occupiedById === family.id) previous.property.occupiedById = previous.property.occupiedByIds[0] || null;
+    previous.property.vacancyWeeks = previous.property.occupiedByIds.length ? 0 : previous.property.vacancyWeeks || 0;
   }
   family.homeId = building.id;
   family.tenure = tenure;
-  asArray(family.memberIds).forEach((id) => {
-    const person = findPerson(ctx, id);
-    if (!person) return;
+  family.memberIds = [...new Set([...asArray(family.memberIds), ...members.map((person) => person.id)])];
+  members.forEach((person) => {
+    const wasAtPreviousHome = moved && person.locationId === previous.id && !person.currentTrip;
     person.homeId = building.id;
     person.housing = tenure;
+    if (wasAtPreviousHome) {
+      person.locationId = building.id;
+      person.x = Number(building.x || 0) + Number(building.w || 0) / 2;
+      person.y = Number(building.y || 0) + Number(building.h || 0) / 2;
+      person.destinationId = null;
+      person.target = null;
+      person.path = [];
+      person.activity = "Em casa";
+      person.currentAction = {
+        ...(person.currentAction || {}),
+        text: "Em casa",
+        phase: "present",
+        placeId: building.id,
+        destinationId: null,
+        mode: null,
+        sinceWeek: ctx?.week || 1,
+        sinceDay: ctx?.day || 0,
+        sinceMinute: ctx?.minute || 0,
+      };
+    }
+    if (moved) {
+      person.history = asArray(person.history);
+      pushHistory(person.history, {
+        week: ctx?.week || 1,
+        text: `Mudou-se para ${building.name}.`,
+        placeIds: [building.id],
+      }, MARKET_COLLECTION_LIMITS.actorHistory);
+    }
   });
-  metadata.occupiedById = family.id;
+  metadata.occupiedByIds = [...new Set([
+    metadata.occupiedById,
+    ...asArray(metadata.occupiedByIds),
+    ...existingTargetHouseholds,
+    family.id,
+  ].filter(Boolean))].slice(0, 240);
+  metadata.occupiedById = metadata.occupiedByIds[0] || family.id;
   metadata.vacancyWeeks = 0;
-  building.occupied = asArray(family.memberIds).length;
   building.tenure = tenure;
+  if (ctx?.housingSystem) {
+    ctx.housingSystem.hotelGuests = asArray(ctx.housingSystem.hotelGuests).filter((id) => !memberIds.has(id));
+    if (moved) ctx.housingSystem.moves = Math.max(0, Number(ctx.housingSystem.moves) || 0) + 1;
+  }
+  if (moved) {
+    family.milestones = asArray(family.milestones);
+    pushHistory(family.milestones, {
+      week: ctx?.week || 1,
+      text: `O domicílio mudou-se para ${building.name}.`,
+      placeIds: [building.id],
+    }, 120);
+  }
+  if (typeof ctx?.syncHousingOccupancy === "function") ctx.syncHousingOccupancy();
+  else {
+    if (previous) previous.occupied = asArray(ctx?.people).filter((person) => person.alive !== false && person.homeId === previous.id).length;
+    building.occupied = asArray(ctx?.people).filter((person) => person.alive !== false && person.homeId === building.id).length;
+  }
   return true;
 }
 
@@ -912,6 +1161,10 @@ export function purchaseProperty(ctx, stateInput, listingId, buyerId, options = 
   if (listing.acceptedBuyerId && listing.acceptedBuyerId !== buyerId) return failure("O vendedor já aceitou a proposta de outro comprador.", "reserved_listing");
   const building = findBuilding(ctx, listing.buildingId);
   if (!building) return failure("Imóvel não encontrado.", "property_not_found");
+  const family = findFamily(ctx, buyerId) || findFamilyForPerson(ctx, findPerson(ctx, buyerId));
+  const residential = propertyCatalogEntry(building).use.startsWith("residencial");
+  if (options.occupy !== false && family && residential && !householdCanTakeExclusivePossession(ctx, family, building))
+    return failure("O imóvel não está vago ou não comporta todos os integrantes do domicílio.", "property_capacity");
   const price = roundMoney(listing.negotiable ? clamp(options.offer || listing.price, listing.price * .82, listing.price * 1.05) : listing.price);
   const agency = state.realEstate.agencies.find((item) => item.id === listing.agencyId);
   const commission = roundMoney(price * (agency?.saleCommission || .035));
@@ -953,9 +1206,9 @@ export function purchaseProperty(ctx, stateInput, listingId, buyerId, options = 
     transaction.contractId = contract.id;
     metadata.mortgageContractId = contract.id;
   }
-  const family = findFamily(ctx, buyerId) || findFamily(ctx, findPerson(ctx, buyerId)?.familyId);
-  if (options.occupy !== false && family && propertyCatalogEntry(building).use.startsWith("residencial")) moveFamilyIntoProperty(ctx, family.id, building.id, mortgage ? "mortgage" : "owned");
+  if (options.occupy !== false && family && residential) moveFamilyIntoProperty(ctx, family.id, building.id, mortgage ? "mortgage" : "owned");
   emit(ctx, "mercado imobiliário", `${family ? `A família ${family.surname}` : "Um comprador"} adquiriu ${building.name}.`, "money");
+  trimMarketCollections(state);
   return success({ state, transaction, building, contract: mortgage ? state.realEstate.contracts[0] : null });
 }
 
@@ -965,6 +1218,10 @@ export function rentProperty(ctx, stateInput, listingId, tenantId, options = {})
   if (!listing || listing.status !== "active" || listing.kind !== "rent") return failure("Anúncio de aluguel não encontrado.", "listing_not_found");
   const building = findBuilding(ctx, listing.buildingId);
   if (!building) return failure("Imóvel não encontrado.", "property_not_found");
+  const family = findFamily(ctx, tenantId) || findFamilyForPerson(ctx, findPerson(ctx, tenantId));
+  const residential = propertyCatalogEntry(building).use.startsWith("residencial");
+  if (family && residential && !householdFitsProperty(ctx, family, building))
+    return failure("O imóvel não está vago ou não comporta todos os integrantes do domicílio.", "property_capacity");
   const durationWeeks = Math.max(13, options.durationWeeks || realEstateMarketRules.defaultLeaseWeeks);
   const monthlyRent = roundMoney(listing.price);
   const weeklyRent = roundMoney(monthlyRent * 12 / 52);
@@ -980,10 +1237,18 @@ export function rentProperty(ctx, stateInput, listingId, tenantId, options = {})
   const contract = {
     id: marketId(state, "property-lease"), type: "lease", listingId, buildingId: building.id,
     landlordId: listing.sellerId, tenantId, monthlyRent, weeklyRent, deposit, durationWeeks,
+    rentalUnit: listing.rentalUnit ? { ...listing.rentalUnit } : null,
     remainingWeeks: durationWeeks, annualAdjustment: .055, paid: weeklyRent, arrearsWeeks: 0,
     status: "active", started: timeStamp(ctx), history: [],
   };
   state.realEstate.contracts.unshift(contract);
+  const transaction = {
+    id: marketId(state, "property-lease-transaction"), type: "lease", listingId,
+    buildingId: building.id, sellerId: listing.sellerId, tenantId, price: monthlyRent,
+    commission: initialCommission, transferTax: 0, registryFee: 0, financed: false,
+    contractId: contract.id, ...timeStamp(ctx),
+  };
+  state.realEstate.transactions.unshift(transaction);
   listing.status = "leased";
   listing.tenantId = tenantId;
   listing.contractId = contract.id;
@@ -991,12 +1256,16 @@ export function rentProperty(ctx, stateInput, listingId, tenantId, options = {})
   const metadata = ensurePropertyMetadata(building);
   metadata.listingId = null;
   metadata.leaseContractId = contract.id;
-  metadata.occupiedById = tenantId;
-  const family = findFamily(ctx, tenantId) || findFamily(ctx, findPerson(ctx, tenantId)?.familyId);
-  if (family && propertyCatalogEntry(building).use.startsWith("residencial")) moveFamilyIntoProperty(ctx, family.id, building.id, "rent");
+  metadata.leaseContractIds = [...new Set([contract.id, ...asArray(metadata.leaseContractIds)])].slice(0, 120);
+  if (family && residential) moveFamilyIntoProperty(ctx, family.id, building.id, "rent");
+  else {
+    metadata.occupiedById ||= tenantId;
+    metadata.occupiedByIds = [...new Set([...asArray(metadata.occupiedByIds), tenantId])].slice(0, 240);
+  }
   state.realEstate.stats.leased++;
   state.realEstate.stats.commission = roundMoney(state.realEstate.stats.commission + initialCommission);
-  return success({ state, contract, building });
+  trimMarketCollections(state);
+  return success({ state, contract, transaction, building });
 }
 
 export function terminatePropertyLease(ctx, stateInput, contractId, options = {}) {
@@ -1014,10 +1283,10 @@ export function terminatePropertyLease(ctx, stateInput, contractId, options = {}
   contract.depositRefund = refund;
   if (building) {
     const metadata = ensurePropertyMetadata(building);
-    metadata.occupiedById = null;
-    metadata.leaseContractId = null;
+    metadata.leaseContractIds = asArray(metadata.leaseContractIds).filter((id) => id !== contract.id);
+    metadata.leaseContractId = metadata.leaseContractIds[0] || null;
     metadata.vacancyWeeks = 0;
-    building.occupied = 0;
+    building.occupied = asArray(ctx?.people).filter((person) => person.alive !== false && person.homeId === building.id).length;
   }
   return success({ state, contract, refund });
 }
@@ -1385,11 +1654,47 @@ export function seedMarketListings(ctx, stateInput, options = {}) {
     .slice(0, vehicleLimit)
     .forEach((vehicle, index) => createVehicleListing(ctx, state, vehicle.id, { kind: index % 4 === 3 ? "rental" : "sale" }));
   const propertyLimit = options.propertyListings ?? Math.min(14, Math.floor(asArray(ctx?.buildings).filter((item) => item.type === "home").length * .22));
-  asArray(ctx?.buildings)
-    .filter((building) => ["home", "shop"].includes(building.type) && !building.businessId)
-    .sort((a, b) => Number(Boolean(a.occupied)) - Number(Boolean(b.occupied)) || rng() - .5)
-    .slice(0, propertyLimit)
-    .forEach((building, index) => createPropertyListing(ctx, state, building.id, { kind: index % 3 ? "rent" : "sale" }));
+  const activePropertyIds = new Set(
+    state.realEstate.listings.filter((listing) => listing.status === "active").map((listing) => listing.buildingId),
+  );
+  const propertyCandidates = asArray(ctx?.buildings)
+    .filter((building) => ["home", "shop"].includes(building.type) && !building.businessId && !activePropertyIds.has(building.id))
+    .sort(() => rng() - .5);
+  if (propertyLimit > 0 && propertyCandidates.length) {
+    const selected = new Set();
+    const rentTarget = propertyLimit > 1 ? Math.max(1, Math.round(propertyLimit * 2 / 3)) : 0;
+    const saleTarget = Math.max(1, propertyLimit - rentTarget);
+    propertyCandidates
+      .filter((building) => propertyRentalAvailability(ctx, building).rentable)
+      .sort((left, right) => {
+        const leftAvailability = propertyRentalAvailability(ctx, left);
+        const rightAvailability = propertyRentalAvailability(ctx, right);
+        return Number(rightAvailability.mode === "unit") - Number(leftAvailability.mode === "unit")
+          || rightAvailability.availableCapacity - leftAvailability.availableCapacity;
+      })
+      .slice(0, rentTarget)
+      .forEach((building) => {
+        const result = createPropertyListing(ctx, state, building.id, { kind: "rent" });
+        if (result.ok) selected.add(building.id);
+      });
+    propertyCandidates
+      .filter((building) => !selected.has(building.id))
+      .sort((left, right) => Number(Boolean(left.occupied)) - Number(Boolean(right.occupied)))
+      .slice(0, saleTarget)
+      .forEach((building) => {
+        const result = createPropertyListing(ctx, state, building.id, { kind: "sale" });
+        if (result.ok) selected.add(building.id);
+      });
+    if (selected.size < propertyLimit) {
+      propertyCandidates
+        .filter((building) => !selected.has(building.id))
+        .slice(0, propertyLimit - selected.size)
+        .forEach((building) => {
+          const result = createPropertyListing(ctx, state, building.id, { kind: "sale" });
+          if (result.ok) selected.add(building.id);
+        });
+    }
+  }
   return state;
 }
 
@@ -1459,6 +1764,9 @@ export const marketsApi = Object.freeze({
   initializeMarkets,
   tickMarkets,
   getMarketSnapshot,
+  trimMarketCollections,
+  personMonthlyIncome,
+  householdMonthlyIncome,
   createVehicleListing,
   cancelVehicleListing,
   submitVehicleOffer,

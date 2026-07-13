@@ -7,6 +7,7 @@ import {
   traits as traitCatalog,
 } from "./data.js";
 import { eyeColors, hairColors, identities, orientations, pronounsForIdentity, skinTones } from "./lifecycle.js";
+import { interests as interestCatalog, values as valueCatalog } from "./personality.js";
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, Number(value) || 0));
 const unique = (values = []) => [...new Set(values.filter(Boolean))];
@@ -40,6 +41,11 @@ const createAppearance = (rng = Math.random) => ({
 
 export const GAMEPLAY_VERSION = 1;
 export const GAME_MODES = Object.freeze({ SPECTATOR: "spectator", GAMEPLAY: "gameplay" });
+export const relationshipPreferenceCatalog = Object.freeze([
+  { id: "monogamico", name: "Monogamia", description: "Prefere construir um vínculo exclusivo." },
+  { id: "nao_monogamico_consensual", name: "Não monogamia consensual", description: "Prefere acordos afetivos não exclusivos e transparentes." },
+  { id: "a_definir", name: "Descobrir ao longo da vida", description: "Vai conversar e decidir conforme os vínculos surgirem." },
+]);
 
 export const gameModeCatalog = Object.freeze([
   {
@@ -48,15 +54,15 @@ export const gameModeCatalog = Object.freeze([
     description: "A cidade toma suas próprias decisões enquanto o usuário observa e investiga seus sistemas.",
     directControl: false,
     paceMultiplier: 1,
-    recommendedPreset: "96x",
+    recommendedPreset: "24x",
   },
   {
     id: GAME_MODES.GAMEPLAY,
     name: "Modo Gameplay",
     description: "O jogador vive como um cidadão, toma decisões e convive com as consequências da simulação.",
     directControl: true,
-    paceMultiplier: .72,
-    recommendedPreset: "24x",
+    paceMultiplier: 1,
+    recommendedPreset: "1x",
   },
 ]);
 
@@ -98,6 +104,8 @@ export const playerActionCatalog = Object.freeze([
   { id: "seek_healthcare", name: "Procurar atendimento", category: "health", targetKinds: ["building", "business"], durationMinutes: 45, movementRequired: true, interruptible: false, allowedWhileIncarcerated: true },
   { id: "use_transport", name: "Usar transporte", category: "navigation", targetKinds: ["place", "building", "vehicle"], durationMinutes: 20, movementRequired: true, interruptible: true },
   { id: "manage_property", name: "Gerenciar propriedade", category: "property", targetKinds: ["building"], durationMinutes: 30, movementRequired: false, interruptible: true, minAge: 18 },
+  { id: "buy_property", name: "Comprar imóvel", category: "property", targetKinds: ["building"], durationMinutes: 60, movementRequired: false, interruptible: false, minAge: 18, usesMoney: true },
+  { id: "rent_property", name: "Alugar imóvel", category: "property", targetKinds: ["building"], durationMinutes: 45, movementRequired: false, interruptible: false, minAge: 18, usesMoney: true },
   { id: "manage_business", name: "Gerenciar negócio", category: "business", targetKinds: ["business"], durationMinutes: 45, movementRequired: false, interruptible: true, minAge: 18 },
   { id: "civic_action", name: "Participar da vida pública", category: "civic", targetKinds: ["building", "place", "person"], durationMinutes: 60, movementRequired: true, interruptible: true, minAge: 16 },
   { id: "underground_action", name: "Realizar atividade clandestina", category: "underground", targetKinds: ["business", "building", "person", "place"], durationMinutes: 45, movementRequired: true, interruptible: false, minAge: 18, illegal: true },
@@ -142,6 +150,9 @@ export function createCharacterDraft(options = {}, rng = Math.random) {
   const originId = catalogById(availableOrigins, options.originId)?.id || availableOrigins[0]?.id || "city_native";
   const selectedTraits = unique(options.traits?.length ? options.traits : [pick(traitCatalog, rng), pick(traitCatalog, rng)]).slice(0, 4);
   const goalIds = unique(options.goalIds?.length ? options.goalIds : ["career", "social"]).slice(0, 3);
+  const selectedValues = unique(options.values?.length ? options.values : [pick(valueCatalog, rng), pick(valueCatalog, rng)]).slice(0, 3);
+  const selectedInterests = unique(options.interests?.length ? options.interests : [pick(interestCatalog, rng), pick(interestCatalog, rng), pick(interestCatalog, rng)]).slice(0, 5);
+  const relationshipModel = catalogById(relationshipPreferenceCatalog, options.relationshipPreferences?.model)?.id || "a_definir";
   return {
     firstName,
     family,
@@ -150,8 +161,15 @@ export function createCharacterDraft(options = {}, rng = Math.random) {
     pronouns: pronounsForIdentity(identity),
     orientation: orientations.includes(options.orientation) ? options.orientation : pick(orientations, rng),
     traits: selectedTraits,
+    values: selectedValues,
+    interests: selectedInterests,
     originId,
     goalIds,
+    relationshipPreferences: {
+      model: relationshipModel,
+      desiredChildren: clamp(Math.floor(Number(options.relationshipPreferences?.desiredChildren ?? 1)), 0, 6),
+      familyTiming: ["agora", "em_breve", "mais_tarde", "nao_deseja", "indefinido"].includes(options.relationshipPreferences?.familyTiming) ? options.relationshipPreferences.familyTiming : "indefinido",
+    },
     professionPreference: cleanText(options.professionPreference, 60),
     biography: cleanText(options.biography, 360),
     appearance: options.appearance && serializable(options.appearance) ? { ...options.appearance } : createAppearance(rng),
@@ -177,6 +195,11 @@ export function validateCharacterDraft(draft = {}, options = {}) {
   if (!selectedTraits.length || selectedTraits.length > 4 || selectedTraits.some((trait) => !traitCatalog.includes(trait))) add(errors, "invalid_traits", "traits", "Escolha de uma a quatro características disponíveis.");
   const selectedGoals = unique(Array.isArray(draft.goalIds) ? draft.goalIds : []);
   if (!selectedGoals.length || selectedGoals.length > 3 || selectedGoals.some((id) => !catalogById(playerGoalCatalog, id))) add(errors, "invalid_goals", "goalIds", "Escolha de um a três objetivos disponíveis.");
+  const selectedValues = unique(Array.isArray(draft.values) ? draft.values : []), selectedInterests = unique(Array.isArray(draft.interests) ? draft.interests : []);
+  if (draft.values && (!selectedValues.length || selectedValues.length > 3 || selectedValues.some((value) => !valueCatalog.includes(value)))) add(errors, "invalid_values", "values", "Escolha de um a três valores disponíveis.");
+  if (draft.interests && (!selectedInterests.length || selectedInterests.length > 5 || selectedInterests.some((interest) => !interestCatalog.includes(interest)))) add(errors, "invalid_interests", "interests", "Escolha de um a cinco interesses disponíveis.");
+  if (draft.relationshipPreferences?.model && !catalogById(relationshipPreferenceCatalog, draft.relationshipPreferences.model)) add(errors, "invalid_relationship_model", "relationshipModel", "Escolha uma preferência de relacionamento válida.");
+  if (draft.relationshipPreferences?.desiredChildren != null && (Number(draft.relationshipPreferences.desiredChildren) < 0 || Number(draft.relationshipPreferences.desiredChildren) > 6)) add(errors, "invalid_children_preference", "desiredChildren", "A expectativa de filhos deve ficar entre zero e seis.");
   if (identities.includes(draft.identity) && firstName && !isNameCoherentWithIdentity(firstName, draft.identity)) {
     add(options.strictNameIdentity ? errors : warnings, "name_identity_mismatch", "firstName", "O nome não pertence ao catálogo da identidade selecionada.");
   }
@@ -235,6 +258,11 @@ export function createSimulationPersonPatch(character, context = {}) {
     decisionMode: "player",
     playerControl: { autonomyFallback: true, obeyRoutineWhenIdle: true, directCommandPriority: 100 },
     origin: { id: origin.id, tags: [...origin.tags] },
+    playerPreferences: {
+      values: [...(character.values || [])],
+      interests: [...(character.interests || [])],
+      relationships: { ...(character.relationshipPreferences || {}) },
+    },
     personalGoals: character.goals.map((goal) => ({ ...goal, milestones: [...goal.milestones] })),
   };
 }
@@ -291,7 +319,12 @@ export function normalizeGameSession(value = {}) {
     status: ["setup", "ready", "running", "paused", "ended"].includes(base.status) ? base.status : "setup",
     createdAt: clockOf(base.createdAt),
     updatedAt: clockOf(base.updatedAt),
-    settings: { ...createGameSession({ mode: definition.id }).settings, ...base.settings },
+    settings: {
+      ...createGameSession({ mode: definition.id }).settings,
+      ...base.settings,
+      paceMultiplier: 1,
+      recommendedPreset: definition.recommendedPreset,
+    },
     player: base.player ? {
       ...base.player,
       character: base.player.character ? { ...base.player.character } : null,
@@ -451,9 +484,8 @@ export function updatePlayerGoal(previousState, goalId, delta, milestone, option
   return { ok: true, goal: updatedGoal, state: { ...state, player: { ...state.player, character }, updatedAt: clock, revision: state.revision + 1 } };
 }
 
-export function getSessionPaceMultiplier(session) {
-  const state = normalizeGameSession(session);
-  return clamp(state.settings.paceMultiplier ?? gameModeDefinition(state.mode).paceMultiplier, .1, 2);
+export function getSessionPaceMultiplier() {
+  return 1;
 }
 
 export function gameplayDirective(session) {

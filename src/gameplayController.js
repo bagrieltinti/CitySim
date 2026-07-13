@@ -1,6 +1,7 @@
 import { traits as traitCatalog } from "./data.js";
 import { formatAddress } from "./city.js";
-import { identities, orientations } from "./lifecycle.js";
+import { eyeColors, hairColors, identities, orientations, skinTones } from "./lifecycle.js";
+import { interests as interestCatalog, values as valueCatalog } from "./personality.js";
 import {
   GAME_MODES,
   bindPlayerPerson,
@@ -13,11 +14,14 @@ import {
   gameModeCatalog,
   getSessionPaceMultiplier,
   playerGoalCatalog,
+  relationshipPreferenceCatalog,
   resolvePlayerCommand,
   setGameSessionPaused,
   startGameSession,
   updatePlayerGoal,
 } from "./gameplay.js";
+import { derivePlayerGoalProgress, nextPlayerGoalMilestone, PLAYER_GOAL_MILESTONES } from "./playerObjectives.js";
+import { executePlayerPropertyTransaction, getRealEstatePortal } from "./realEstateCoordinator.js";
 
 const escapeHTML = (value = "") => String(value)
   .replaceAll("&", "&amp;")
@@ -31,11 +35,12 @@ const money = (value) => `R$ ${Math.round(Number(value) || 0).toLocaleString("pt
 const clockOf = (sim) => ({ week: sim?.week || 1, day: sim?.day || 0, minute: sim?.minute || 0 });
 const initials = (name = "") => name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
 const dayNames = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"];
-const actionIcons = { go_to: "⌖", go_home: "⌂", rest: "☾", eat: "◉", hygiene: "◇", wait: "◷", work: "▣", study: "✎", shop: "▤", talk: "◌", apply_job: "◆", enroll: "▧", seek_healthcare: "✚", cancel: "×" };
-const goalByAction = { work: ["career", 2], apply_job: ["career", 10], study: ["education", 3], enroll: ["education", 8], talk: ["social", 2], socialize: ["social", 3], shop: ["wealth", 1] };
+const actionIcons = { go_to: "⌖", go_home: "⌂", rest: "☾", eat: "◉", hygiene: "◇", wait: "◷", work: "▣", study: "✎", shop: "▤", talk: "◌", apply_job: "◆", enroll: "▧", seek_healthcare: "✚", buy_property: "⌂", rent_property: "⌑", cancel: "×" };
+const goalByAction = { work: ["career", 2], apply_job: ["career", 10], study: ["education", 3], enroll: ["education", 8], socialize: ["social", 3], shop: ["wealth", 1], buy_property: ["wealth", 18], rent_property: ["wealth", 6] };
+const skinPreview = { clara: "#e5bda5", média: "#c48f70", morena: "#9b705a", escura: "#654638" };
 
-function actionButton({ action, title, subtitle, targetKind = "", targetId = "", icon, product = "", kind = "", role = "", course = "", disabled = false, cost = "" }) {
-  return `<button class="player-action" data-player-action="${escapeAttribute(action)}"${targetKind ? ` data-target-kind="${escapeAttribute(targetKind)}"` : ""}${targetId ? ` data-target-id="${escapeAttribute(targetId)}"` : ""}${product ? ` data-product="${escapeAttribute(product)}"` : ""}${kind ? ` data-interaction-kind="${escapeAttribute(kind)}"` : ""}${role ? ` data-role="${escapeAttribute(role)}"` : ""}${course ? ` data-course="${escapeAttribute(course)}"` : ""}${disabled ? " disabled" : ""}><i>${icon || actionIcons[action] || "•"}</i><span><b>${escapeHTML(title)}</b><small>${escapeHTML(subtitle || "")}</small></span>${cost ? `<em class="player-action-cost">${escapeHTML(cost)}</em>` : ""}</button>`;
+function actionButton({ action, title, subtitle, targetKind = "", targetId = "", icon, product = "", kind = "", role = "", course = "", operation = "", listingId = "", amount = 0, disabled = false, cost = "" }) {
+  return `<button class="player-action" data-player-action="${escapeAttribute(action)}"${targetKind ? ` data-target-kind="${escapeAttribute(targetKind)}"` : ""}${targetId ? ` data-target-id="${escapeAttribute(targetId)}"` : ""}${product ? ` data-product="${escapeAttribute(product)}"` : ""}${kind ? ` data-interaction-kind="${escapeAttribute(kind)}"` : ""}${role ? ` data-role="${escapeAttribute(role)}"` : ""}${course ? ` data-course="${escapeAttribute(course)}"` : ""}${operation ? ` data-operation="${escapeAttribute(operation)}"` : ""}${listingId ? ` data-listing-id="${escapeAttribute(listingId)}"` : ""}${amount ? ` data-action-cost="${Number(amount)}"` : ""}${disabled ? " disabled" : ""}><i>${icon || actionIcons[action] || "•"}</i><span><b>${escapeHTML(title)}</b><small>${escapeHTML(subtitle || "")}</small></span>${cost ? `<em class="player-action-cost">${escapeHTML(cost)}</em>` : ""}</button>`;
 }
 
 export function createGameplayController(options = {}) {
@@ -94,7 +99,7 @@ export function createGameplayController(options = {}) {
     };
     setupView = "modes";
     const savesByMode = Object.fromEntries(gameModeCatalog.map((mode) => [mode.id, slotEntries(mode.id).filter((entry) => entry.status === "ready" || entry.occupied).length]));
-    setupRoot.innerHTML = `<div class="game-setup-view">${renderBrand()}<section class="game-setup-card"><header class="game-setup-card-head"><div><span class="game-setup-eyebrow">CIDADE VIVA</span><h1 class="game-setup-title">Como você quer viver esta cidade?</h1><p class="game-setup-subtitle">Cada modo mantém três cidades próprias neste navegador. Continue uma história existente ou escolha um slot para começar de novo.</p></div><span class="game-setup-step-count">6 SLOTS LOCAIS</span></header><div class="game-setup-mode-grid">${gameModeCatalog.map((mode) => `<button class="game-setup-mode ${selectedMode === mode.id ? "game-setup-selected" : ""}" data-select-mode="${mode.id}" aria-pressed="${selectedMode === mode.id}"><span class="game-setup-mode-visual"><i class="game-setup-mode-icon">${mode.id === GAME_MODES.SPECTATOR ? "◉" : "♙"}</i><em class="game-setup-mode-tag">${savesByMode[mode.id]}/3 SALVOS</em></span><span class="game-setup-mode-copy"><h2>${escapeHTML(mode.name)}</h2><p>${escapeHTML(mode.description)}</p><ul class="game-setup-mode-features">${modeFeatures[mode.id].map((feature) => `<li>${escapeHTML(feature)}</li>`).join("")}</ul></span></button>`).join("")}</div><footer class="game-setup-card-footer"><span class="game-setup-footer-note">Os saves ficam apenas neste navegador e são separados entre Sandbox observador e Gameplay.</span><button class="game-setup-button" data-confirm-mode ${selectedMode ? "" : "disabled"}>Ver 3 slots →</button></footer></section></div>`;
+    setupRoot.innerHTML = `<div class="game-setup-view game-setup-view-modes">${renderBrand()}<section class="game-setup-card"><header class="game-setup-card-head"><div><span class="game-setup-eyebrow">CIDADE VIVA</span><h1 class="game-setup-title">Como você quer viver esta cidade?</h1><p class="game-setup-subtitle">Cada modo mantém três cidades próprias neste navegador. Continue uma história existente ou escolha um slot para começar de novo.</p></div><span class="game-setup-step-count">6 SLOTS LOCAIS</span></header><div class="game-setup-mode-grid">${gameModeCatalog.map((mode) => `<button class="game-setup-mode ${selectedMode === mode.id ? "game-setup-selected" : ""}" data-select-mode="${mode.id}" aria-pressed="${selectedMode === mode.id}"><span class="game-setup-mode-visual"><i class="game-setup-mode-icon">${mode.id === GAME_MODES.SPECTATOR ? "◉" : "♙"}</i><em class="game-setup-mode-tag">${savesByMode[mode.id]}/3 SALVOS</em></span><span class="game-setup-mode-copy"><h2>${escapeHTML(mode.name)}</h2><p>${escapeHTML(mode.description)}</p><ul class="game-setup-mode-features">${modeFeatures[mode.id].map((feature) => `<li>${escapeHTML(feature)}</li>`).join("")}</ul></span></button>`).join("")}</div><footer class="game-setup-card-footer"><span class="game-setup-footer-note">Os saves ficam apenas neste navegador e são separados entre Sandbox observador e Gameplay.</span><button class="game-setup-button" data-confirm-mode ${selectedMode ? "" : "disabled"}>Ver 3 slots →</button></footer></section></div>`;
   }
 
   function renderSlotSelection(mode = selectedMode) {
@@ -123,6 +128,14 @@ export function createGameplayController(options = {}) {
     const selectedOrigin = characterOriginCatalog.find((origin) => origin.id === draft.originId);
     const fieldError = (field) => errors.find((error) => error.field === field)?.message || "";
     setupRoot.innerHTML = `<div class="game-setup-view">${renderBrand()}<section class="game-setup-card game-setup-creator"><aside class="game-setup-creator-nav"><h2>Seu cidadão</h2><div class="game-setup-progress"><span class="game-setup-progress-step game-setup-complete"><i>✓</i><span>Modo escolhido<small>Gameplay</small></span></span><span class="game-setup-progress-step game-setup-current"><i>2</i><span>Identidade e origem<small>Quem você será</small></span></span><span class="game-setup-progress-step"><i>3</i><span>Entrar na cidade<small>Sua história começa</small></span></span></div><div class="game-setup-creator-tip"><b>Nada acontece isoladamente</b>Sua origem define dinheiro, moradia e vínculos iniciais. Trabalho, estudo, saúde, relações e justiça continuarão ligados à mesma cidade.</div></aside><div class="game-setup-creator-main"><header class="game-setup-creator-head"><span class="game-setup-eyebrow">PERSONAGEM JOGÁVEL</span><h1>Quem você será em Vila Esperança?</h1><p>Crie uma pessoa coerente com o mundo. Depois, suas escolhas — e as consequências delas — serão suas.</p></header><form class="game-setup-form" id="characterCreator" novalidate><section class="game-setup-form-section"><h3>Identidade</h3><p>Nome, idade e como seu personagem se apresenta.</p><div class="game-setup-appearance"><div class="game-setup-avatar-preview" style="--game-setup-avatar:${escapeAttribute(draft.appearance?.skin || "#9b705a")}"><i>${escapeHTML(initials(`${draft.firstName} ${draft.family}`) || "CV")}</i><span>${escapeHTML(`${draft.firstName} ${draft.family}`)}</span></div><div class="game-setup-field-grid game-setup-field-grid-three"><label class="game-setup-field"><span>Primeiro nome</span><input name="firstName" maxlength="32" value="${escapeAttribute(draft.firstName)}" class="${fieldError("firstName") ? "game-setup-invalid" : ""}" required>${fieldError("firstName") ? `<small class="game-setup-field-error">${escapeHTML(fieldError("firstName"))}</small>` : ""}</label><label class="game-setup-field"><span>Sobrenome</span><input name="family" maxlength="40" value="${escapeAttribute(draft.family)}" class="${fieldError("family") ? "game-setup-invalid" : ""}" required>${fieldError("family") ? `<small class="game-setup-field-error">${escapeHTML(fieldError("family"))}</small>` : ""}</label><label class="game-setup-field"><span>Idade</span><input name="age" type="number" min="16" max="90" value="${draft.age}" class="${fieldError("age") ? "game-setup-invalid" : ""}" required>${fieldError("age") ? `<small class="game-setup-field-error">${escapeHTML(fieldError("age"))}</small>` : ""}</label><label class="game-setup-field"><span>Identidade</span><select name="identity">${identities.map((identity) => `<option value="${escapeAttribute(identity)}" ${identity === draft.identity ? "selected" : ""}>${escapeHTML(identity)}</option>`).join("")}</select></label><label class="game-setup-field"><span>Orientação</span><select name="orientation">${orientations.map((orientation) => `<option value="${escapeAttribute(orientation)}" ${orientation === draft.orientation ? "selected" : ""}>${escapeHTML(orientation)}</option>`).join("")}</select></label><label class="game-setup-field"><span>Profissão desejada</span><input name="professionPreference" maxlength="60" value="${escapeAttribute(draft.professionPreference || "")}" placeholder="Ex.: jornalista, motorista"></label></div></div></section><section class="game-setup-form-section"><h3>Origem</h3><p>Sua situação inicial muda recursos, moradia, contatos e reputação.</p><div class="game-setup-option-grid">${availableOrigins.map((origin) => `<button type="button" class="game-setup-option ${draft.originId === origin.id ? "game-setup-selected" : ""}" data-origin="${origin.id}"><b>${escapeHTML(origin.name)}</b><small>${escapeHTML(origin.description)}</small></button>`).join("")}</div>${fieldError("originId") ? `<small class="game-setup-field-error">${escapeHTML(fieldError("originId"))}</small>` : ""}</section><section class="game-setup-form-section"><h3>Personalidade</h3><p>Escolha de uma a quatro características. Elas influenciam afinidades e decisões futuras.</p><div class="game-setup-option-grid">${traitCatalog.map((trait) => `<button type="button" class="game-setup-option ${draft.traits.includes(trait) ? "game-setup-selected" : ""}" data-trait="${escapeAttribute(trait)}"><b>${escapeHTML(trait)}</b><small>${draft.traits.includes(trait) ? "Característica selecionada" : "Adicionar ao personagem"}</small></button>`).join("")}</div>${fieldError("traits") ? `<small class="game-setup-field-error">${escapeHTML(fieldError("traits"))}</small>` : ""}</section><section class="game-setup-form-section"><h3>Objetivos de vida</h3><p>Escolha de um a três. Eles não são regras: são trilhas de progresso para a sua história.</p><div class="game-setup-option-grid">${playerGoalCatalog.map((goal) => `<button type="button" class="game-setup-option ${draft.goalIds.includes(goal.id) ? "game-setup-selected" : ""}" data-goal="${goal.id}"><b>${escapeHTML(goal.name)}</b><small>${escapeHTML(goal.description)}</small></button>`).join("")}</div>${fieldError("goalIds") ? `<small class="game-setup-field-error">${escapeHTML(fieldError("goalIds"))}</small>` : ""}</section><section class="game-setup-form-section"><h3>Breve história</h3><div class="game-setup-field-grid"><label class="game-setup-field game-setup-field-wide"><span>Biografia opcional</span><textarea name="biography" maxlength="360" placeholder="O que trouxe você até aqui?">${escapeHTML(draft.biography || "")}</textarea></label></div></section>${warnings.length ? `<p class="player-action-message">${warnings.map((warning) => escapeHTML(warning.message)).join(" ")}</p>` : ""}<div class="game-setup-summary"><div class="game-setup-avatar-preview" style="--game-setup-avatar:${escapeAttribute(draft.appearance?.skin || "#9b705a")}"><i>${escapeHTML(initials(`${draft.firstName} ${draft.family}`) || "CV")}</i><span>${escapeHTML(`${draft.firstName} ${draft.family}`)}</span></div><div class="game-setup-summary-list"><span class="game-setup-summary-item"><small>Origem</small><b>${escapeHTML(selectedOrigin?.name || "A definir")}</b></span><span class="game-setup-summary-item"><small>Recursos</small><b>${money(selectedOrigin?.startingMoney || 0)}</b></span><span class="game-setup-summary-item"><small>Traços</small><b>${escapeHTML(draft.traits.join(", ") || "A definir")}</b></span><span class="game-setup-summary-item"><small>Objetivos</small><b>${draft.goalIds.length}</b></span></div></div></form><footer class="game-setup-creator-footer"><button class="game-setup-button game-setup-button-secondary" type="button" data-creator-back>← Escolher outro modo</button><span><button class="game-setup-button game-setup-button-secondary" type="button" data-randomize-character>Sortear personagem</button> <button class="game-setup-button" type="submit" form="characterCreator">Começar minha vida →</button></span></footer></div></section></div>`;
+    const creator = setupRoot.querySelector("#characterCreator");
+    const identitySection = [...creator.querySelectorAll(":scope > .game-setup-form-section")].find((section) => section.querySelector("h3")?.textContent === "Identidade");
+    identitySection?.insertAdjacentHTML("beforeend", `<div class="game-setup-appearance-controls"><h4>Aparência e presença</h4><div class="game-setup-field-grid game-setup-field-grid-three"><label class="game-setup-field"><span>Tom de pele</span><select name="skin">${skinTones.map((tone) => `<option value="${escapeAttribute(tone)}" ${tone === draft.appearance?.skin ? "selected" : ""}>${escapeHTML(tone)}</option>`).join("")}</select></label><label class="game-setup-field"><span>Olhos</span><select name="eyes">${eyeColors.map((color) => `<option value="${escapeAttribute(color)}" ${color === draft.appearance?.eyes ? "selected" : ""}>${escapeHTML(color)}</option>`).join("")}</select></label><label class="game-setup-field"><span>Cabelo</span><select name="hair">${hairColors.map((color) => `<option value="${escapeAttribute(color)}" ${color === draft.appearance?.hair ? "selected" : ""}>${escapeHTML(color)}</option>`).join("")}</select></label><label class="game-setup-field"><span>Altura <b data-height-value>${Math.round(draft.appearance?.height || 170)} cm</b></span><input name="height" type="range" min="150" max="195" value="${Math.round(draft.appearance?.height || 170)}"></label><label class="game-setup-field"><span>Carisma <b data-charisma-value>${Math.round(draft.appearance?.charisma || 50)}%</b></span><input name="charisma" type="range" min="15" max="100" value="${Math.round(draft.appearance?.charisma || 50)}"></label></div></div>`);
+    const originSection = [...creator.querySelectorAll(":scope > .game-setup-form-section")].find((section) => section.querySelector("h3")?.textContent === "Origem");
+    originSection?.insertAdjacentHTML("beforebegin", `<section class="game-setup-form-section"><h3>Valores e interesses</h3><p>Essas escolhas moldam compatibilidade, conversas, decisões e a forma como outras pessoas reagem a você.</p><h4>Valores centrais · até 3</h4><div class="game-setup-option-grid game-setup-option-grid-compact">${valueCatalog.map((value) => `<button type="button" class="game-setup-option ${draft.values?.includes(value) ? "game-setup-selected" : ""}" data-value="${escapeAttribute(value)}"><b>${escapeHTML(value)}</b><small>${draft.values?.includes(value) ? "Valor central" : "Adicionar valor"}</small></button>`).join("")}</div>${fieldError("values") ? `<small class="game-setup-field-error">${escapeHTML(fieldError("values"))}</small>` : ""}<h4>Interesses · até 5</h4><div class="game-setup-option-grid game-setup-option-grid-compact">${interestCatalog.map((interest) => `<button type="button" class="game-setup-option ${draft.interests?.includes(interest) ? "game-setup-selected" : ""}" data-interest="${escapeAttribute(interest)}"><b>${escapeHTML(interest)}</b><small>${draft.interests?.includes(interest) ? "Interesse selecionado" : "Adicionar interesse"}</small></button>`).join("")}</div>${fieldError("interests") ? `<small class="game-setup-field-error">${escapeHTML(fieldError("interests"))}</small>` : ""}</section>`);
+    const goalsSection = [...creator.querySelectorAll(":scope > .game-setup-form-section")].find((section) => section.querySelector("h3")?.textContent === "Objetivos de vida");
+    goalsSection?.insertAdjacentHTML("beforebegin", `<section class="game-setup-form-section"><h3>Afetos e projeto familiar</h3><p>Preferências não garantem resultados: elas orientam conversas, limites e decisões reativas ao longo da vida.</p><div class="game-setup-option-grid">${relationshipPreferenceCatalog.map((preference) => `<button type="button" class="game-setup-option ${draft.relationshipPreferences?.model === preference.id ? "game-setup-selected" : ""}" data-relationship-model="${preference.id}"><b>${escapeHTML(preference.name)}</b><small>${escapeHTML(preference.description)}</small></button>`).join("")}</div><div class="game-setup-field-grid"><label class="game-setup-field"><span>Filhos desejados</span><input name="desiredChildren" type="number" min="0" max="6" value="${Number(draft.relationshipPreferences?.desiredChildren ?? 1)}"></label><label class="game-setup-field"><span>Momento imaginado</span><select name="familyTiming">${[["indefinido", "A conversar"], ["agora", "Agora"], ["em_breve", "Em breve"], ["mais_tarde", "Mais tarde"], ["nao_deseja", "Não deseja"]].map(([id, label]) => `<option value="${id}" ${draft.relationshipPreferences?.familyTiming === id ? "selected" : ""}>${label}</option>`).join("")}</select></label></div>${fieldError("relationshipModel") || fieldError("desiredChildren") ? `<small class="game-setup-field-error">${escapeHTML(fieldError("relationshipModel") || fieldError("desiredChildren"))}</small>` : ""}</section>`);
+    setupRoot.querySelectorAll(".game-setup-avatar-preview").forEach((node) => node.style.setProperty("--game-setup-avatar", skinPreview[draft.appearance?.skin] || skinPreview.morena));
     bindCreatorInputs();
   }
 
@@ -130,7 +143,29 @@ export function createGameplayController(options = {}) {
     const form = setupRoot.querySelector("#characterCreator");
     if (!form) return;
     const data = new FormData(form);
-    draft = { ...draft, firstName: String(data.get("firstName") || ""), family: String(data.get("family") || ""), age: Number(data.get("age")) || draft.age, identity: String(data.get("identity") || draft.identity), orientation: String(data.get("orientation") || draft.orientation), professionPreference: String(data.get("professionPreference") || ""), biography: String(data.get("biography") || "") };
+    draft = {
+      ...draft,
+      firstName: String(data.get("firstName") || ""),
+      family: String(data.get("family") || ""),
+      age: Number(data.get("age")) || draft.age,
+      identity: String(data.get("identity") || draft.identity),
+      orientation: String(data.get("orientation") || draft.orientation),
+      professionPreference: String(data.get("professionPreference") || ""),
+      biography: String(data.get("biography") || ""),
+      appearance: {
+        ...draft.appearance,
+        skin: String(data.get("skin") || draft.appearance?.skin || "morena"),
+        eyes: String(data.get("eyes") || draft.appearance?.eyes || "castanhos"),
+        hair: String(data.get("hair") || draft.appearance?.hair || "castanhos"),
+        height: Number(data.get("height")) || draft.appearance?.height || 170,
+        charisma: Number(data.get("charisma")) || draft.appearance?.charisma || 50,
+      },
+      relationshipPreferences: {
+        ...(draft.relationshipPreferences || {}),
+        desiredChildren: clamp(Number(data.get("desiredChildren") ?? draft.relationshipPreferences?.desiredChildren ?? 1), 0, 6),
+        familyTiming: String(data.get("familyTiming") || draft.relationshipPreferences?.familyTiming || "indefinido"),
+      },
+    };
   }
 
   function bindCreatorInputs() {
@@ -142,6 +177,9 @@ export function createGameplayController(options = {}) {
         setupRoot.querySelectorAll(".game-setup-avatar-preview i").forEach((node) => { node.textContent = initials(name) || "CV"; });
         setupRoot.querySelectorAll(".game-setup-avatar-preview span").forEach((node) => { node.textContent = name; });
       }
+      if (event.target.name === "height") setupRoot.querySelector("[data-height-value]").textContent = `${Math.round(draft.appearance.height)} cm`;
+      if (event.target.name === "charisma") setupRoot.querySelector("[data-charisma-value]").textContent = `${Math.round(draft.appearance.charisma)}%`;
+      if (event.target.name === "skin") setupRoot.querySelectorAll(".game-setup-avatar-preview").forEach((node) => node.style.setProperty("--game-setup-avatar", skinPreview[draft.appearance.skin] || skinPreview.morena));
     });
     form?.addEventListener("change", (event) => {
       syncDraftFromForm();
@@ -298,10 +336,16 @@ export function createGameplayController(options = {}) {
     const resolved = resolvePlayerCommand(session, command.id, { ok: result.ok, outcome: result.details || null, reason: result.ok ? null : result.message || result.reason }, { clock: clockOf(sim()) });
     if (!resolved.ok) return;
     session = resolved.state;
-    if (result.ok && goalByAction[command.actionId]) {
-      const [goalId, increment] = goalByAction[command.actionId];
+    const advanceGoal = (goalId, increment) => {
       const updated = updatePlayerGoal(session, goalId, increment, result.message, { clock: clockOf(sim()) });
       if (updated.ok) session = updated.state;
+    };
+    if (result.ok && goalByAction[command.actionId]) advanceGoal(...goalByAction[command.actionId]);
+    if (result.ok && command.actionId === "talk" && result.details?.accepted !== false) {
+      const kind = result.details?.kind || command.payload?.kind || "talk";
+      if (["family_chat", "family_meal", "family_care"].includes(kind)) { advanceGoal("family", kind === "family_meal" ? 5 : 3); advanceGoal("social", 2); }
+      else if (["define_exclusive", "define_dating", "move_in", "propose", "reconcile"].includes(kind)) { advanceGoal("family", kind === "move_in" || kind === "propose" ? 12 : 8); advanceGoal("social", 3); }
+      else if (!["argue", "breakup"].includes(kind)) advanceGoal("social", ["date", "first_kiss", "affection", "flirt"].includes(kind) ? 4 : 2);
     }
     lastCommandOutcomeId = command.id;
     showToast(result.ok ? "Ação concluída" : "Ação não realizada", result.message || result.reason || "", result.ok ? "success" : "error");
@@ -320,6 +364,13 @@ export function createGameplayController(options = {}) {
     if (command.actionId === "apply_job") return current.playerApplyForJob(command.target?.id, command.payload?.role, { commandId: command.id });
     if (command.actionId === "enroll") return current.playerEnroll(command.target?.id, command.payload?.course, { commandId: command.id });
     if (command.actionId === "seek_healthcare") return current.playerSeekHealthcare(command.target?.id, { commandId: command.id });
+    if (["buy_property", "rent_property"].includes(command.actionId)) {
+      const operation = command.actionId === "buy_property" ? "buy" : "rent", result = executePlayerPropertyTransaction(current, actor, command.payload?.listingId, operation, { finance: operation === "buy" ? { downPaymentRate: .1, months: 240 } : undefined });
+      if (!result.ok) return { ok: false, reason: result.error || "A transação imobiliária não pôde ser concluída." };
+      const building = current.buildings.find((item) => item.id === result.buildingId), message = operation === "buy" ? `Compra de ${building?.name || "imóvel"} concluída; propriedade e financiamento foram atualizados.` : `Contrato de aluguel de ${building?.name || "imóvel"} concluído; seu domicílio foi atualizado.`;
+      current.setPlayerCommandResult(actor, command.id, true, message, { operation, listingId: result.listingId, buildingId: result.buildingId, contractId: result.contract?.id || null });
+      return { ok: true, immediate: true, result };
+    }
     return { ok: false, reason: "essa interação ainda não possui execução direta" };
   }
 
@@ -379,10 +430,12 @@ export function createGameplayController(options = {}) {
     if (button.dataset.interactionKind) payload.kind = button.dataset.interactionKind;
     if (button.dataset.role) payload.role = button.dataset.role;
     if (button.dataset.course) payload.course = button.dataset.course;
+    if (button.dataset.listingId) payload.listingId = button.dataset.listingId;
+    if (button.dataset.operation) payload.operation = button.dataset.operation;
     const travelMode = document.querySelector("#playerTravelMode")?.value;
     if (["go_to", "go_home"].includes(actionId)) payload.mode = button.dataset.mode || travelMode || "auto";
     const product = targetKind === "business" && payload.productName ? current.businesses.find((item) => item.id === targetId)?.products?.[payload.productName] : null;
-    queueAction({ actionId, target: targetId ? { kind: targetKind, id: targetId, label: button.dataset.targetLabel || button.textContent.trim() } : null, payload, cost: product?.price || 0, priority: ["go_to", "go_home"].includes(actionId) ? 90 : 75 });
+    queueAction({ actionId, target: targetId ? { kind: targetKind, id: targetId, label: button.dataset.targetLabel || button.textContent.trim() } : null, payload, cost: Number(button.dataset.actionCost) || product?.price || 0, priority: ["go_to", "go_home"].includes(actionId) ? 90 : 75 });
   }
 
   function renderStates(actor) {
@@ -395,6 +448,26 @@ export function createGameplayController(options = {}) {
     if (actor.shift) states.push(["positive", `${actor.role} · ${actor.workplace}`]);
     if (!states.length) states.push(["positive", "Livre para decidir"]);
     return states.slice(0, 4).map(([tone, label]) => `<span class="player-state player-state-${tone}"><i></i><span>${escapeHTML(label)}</span></span>`).join("");
+  }
+
+  function syncPlayerGoalsFromWorld(actor) {
+    const goals = session?.player?.character?.goals || [];
+    goals.forEach((goal) => {
+      const derived = Math.round(derivePlayerGoalProgress(goal.id, actor, sim()));
+      if (derived <= (goal.progress || 0)) return;
+      const crossed = (PLAYER_GOAL_MILESTONES[goal.id] || []).filter(([threshold]) => (goal.progress || 0) < threshold && derived >= threshold).at(-1);
+      const updated = updatePlayerGoal(session, goal.id, derived - (goal.progress || 0), crossed?.[1] || null, { clock: clockOf(sim()) });
+      if (updated.ok) session = updated.state;
+    });
+    actor.personalGoals = (session?.player?.character?.goals || []).map((goal) => ({ ...goal, milestones: [...(goal.milestones || [])] }));
+  }
+
+  function objectivesPanel(context) {
+    const goals = session?.player?.character?.goals || [];
+    return `<div class="player-goal-list">${goals.map((goal) => {
+      const definition = playerGoalCatalog.find((item) => item.id === goal.id), [threshold, next] = nextPlayerGoalMilestone(goal.id, goal.progress || 0);
+      return `<article class="player-goal-card ${goal.status === "completed" ? "player-goal-complete" : ""}"><header><span><small>${goal.status === "completed" ? "CONCLUÍDO" : `PRÓXIMO MARCO · ${threshold}%`}</small><b>${escapeHTML(definition?.name || goal.id)}</b></span><em>${Math.round(goal.progress || 0)}%</em></header><p>${escapeHTML(goal.status === "completed" ? "Esta aspiração já faz parte do legado do personagem." : next)}</p><div class="player-objective-progress" style="--player-value:${clamp(goal.progress || 0)}%"><i></i></div>${goal.milestones?.length ? `<small class="player-goal-latest">Último avanço: ${escapeHTML(goal.milestones.at(-1).text)}</small>` : ""}</article>`;
+    }).join("")}</div>${goals.length ? "" : `<p class="player-action-message">Seu personagem ainda não escolheu uma aspiração.</p>`}`;
   }
 
   function nearbyDestinations(context) {
@@ -428,8 +501,20 @@ export function createGameplayController(options = {}) {
   }
 
   function peoplePanel(context) {
-    if (!context.nearbyPeople.length) return `<p class="player-action-message">Não há ninguém disponível neste espaço agora. Vá a um comércio, escola, praça ou local de trabalho para encontrar outras pessoas.</p>`;
-    return `<div class="player-action-grid">${context.nearbyPeople.slice(0, 12).flatMap((person) => [actionButton({ action: "talk", title: person.name, subtitle: "Conversar", targetKind: "person", targetId: person.id, kind: "talk", icon: "◌" }), actionButton({ action: "talk", title: `Interagir com ${person.firstName}`, subtitle: "Elogiar, apoiar ou flertar na ficha", targetKind: "person", targetId: person.id, kind: "compliment", icon: "♡" })]).join("")}</div>`;
+    const actor = context.person, nearbyIds = new Set(context.nearbyPeople.map((person) => person.id));
+    const known = sim().relationshipsOf(actor)
+      .filter(({ link, person }) => person.alive && ((link.familiarity || 0) > 0 || link.domain === "family" || link.type === "família"))
+      .sort((left, right) => Number(nearbyIds.has(right.person.id)) - Number(nearbyIds.has(left.person.id)) || (right.link.lastInteractionWeek || 0) - (left.link.lastInteractionWeek || 0) || (right.link.affinity || 0) - (left.link.affinity || 0));
+    const pendingDecisions = (sim().relationshipSystem?.playerPendingDecisions || []).filter((decision) => decision.status === "pending" && decision.personIds?.includes(actor.id));
+    const decisions = pendingDecisions.length ? `<h4 class="player-panel-heading">Conversas importantes · ${pendingDecisions.length}</h4><div class="player-decision-list">${pendingDecisions.map((decision) => { const otherId = decision.personIds.find((id) => id !== actor.id), other = sim().people.find((person) => person.id === otherId); return `<button data-player-open-person="${otherId}"><span><b>${escapeHTML(other?.name || "Vínculo importante")}</b><small>${escapeHTML(decision.reason || (decision.proposedStage ? `A relação está pronta para conversar sobre ${decision.proposedStage.replaceAll("_", " ")}.` : "Há uma decisão familiar esperando sua atenção."))}</small></span><em>Abrir relação →</em></button>`; }).join("")}</div>` : "";
+    const nearby = context.nearbyPeople.length
+      ? `<h4 class="player-panel-heading">Perto de você</h4><div class="player-action-grid">${context.nearbyPeople.slice(0, 8).map((person) => actionButton({ action: "talk", title: person.name, subtitle: "Iniciar uma conversa", targetKind: "person", targetId: person.id, kind: "talk", icon: "◌" })).join("")}</div>`
+      : `<p class="player-action-message">Não há ninguém disponível neste espaço agora. Seus contatos continuam acessíveis abaixo.</p>`;
+    const contacts = known.length ? `<h4 class="player-panel-heading">Pessoas conhecidas · ${known.length}</h4><div class="player-contact-list">${known.slice(0, 30).map(({ link, person }) => {
+      const stage = link.lifecycle?.stage ? link.lifecycle.stage.replaceAll("_", " ") : link.type || "conhecido", present = nearbyIds.has(person.id), location = sim().buildings.find((building) => building.id === person.locationId);
+      return `<article class="player-contact-card"><i style="--player-contact:${escapeAttribute(person.color || "#78897d")}">${escapeHTML(initials(person.name))}</i><span><b>${escapeHTML(person.name)}</b><small>${escapeHTML(stage)} · afinidade ${Math.round(link.affinity || 0)} · confiança ${Math.round(link.trust || 0)}%</small><em>${present ? "Aqui agora" : escapeHTML(location?.name || "Em deslocamento")}</em></span><div><button data-player-open-person="${person.id}">Ficha</button><button data-player-locate-person="${person.id}">Localizar</button>${present ? `<button data-player-open-person="${person.id}">Interagir</button>` : ""}</div></article>`;
+    }).join("")}</div>` : `<p class="player-action-message">Converse com alguém para começar sua agenda de conhecidos.</p>`;
+    return `${decisions}${nearby}${contacts}`;
   }
 
   function careerPanel(context) {
@@ -455,6 +540,18 @@ export function createGameplayController(options = {}) {
     return `<div class="player-action-grid">${buttons.join("") || actionButton({ action: "wait", title: "Planejar próximos passos", subtitle: "A cidade seguirá oferecendo oportunidades" })}</div>`;
   }
 
+  function propertyPanel(context) {
+    const portal = getRealEstatePortal(sim(), context.person);
+    if (!portal.ok) return `<p class="player-action-message">${escapeHTML(portal.error || "O portal imobiliário ainda não está disponível.")}</p>`;
+    const activeContracts = portal.contracts.filter((contract) => contract.status === "active"), listings = portal.listings.filter((listing) => listing.use?.startsWith("residencial") || sim().buildings.find((building) => building.id === listing.buildingId)?.type === "home");
+    const listingHTML = listings.slice(0, 16).map((listing) => {
+      const building = sim().buildings.find((item) => item.id === listing.buildingId), rental = listing.kind === "rent", availableUnits = rental ? listing.rentalUnit?.availableUnitsAtListing || 1 : listing.vacantUnits, required = rental ? listing.costs.upfrontTotal : listing.costs.financing?.downPayment || listing.costs.cashTotal, eligible = rental ? listing.accessibility.canRent : listing.accessibility.canFinance;
+      const detail = rental ? `${money(listing.costs.monthlyRent)}/mês · entrada ${money(required)}` : `${money(listing.costs.askingPrice)} · entrada ${money(required)} · ${listing.costs.financing ? `${listing.costs.financing.months} meses` : "à vista"}`;
+      return `<article class="player-property-card ${eligible ? "player-property-eligible" : ""}"><header><span><b>${escapeHTML(listing.name)}</b><small>${escapeHTML(listing.address?.district || "Vila Esperança")} · capacidade ${listing.capacity} · ${availableUnits} unidade(s) disponível(is)</small></span><em>${rental ? "ALUGUEL" : "VENDA"}</em></header><p>${escapeHTML(detail)}</p><small>${eligible ? `Elegível · crédito ${portal.actor.creditScore} · comprometimento ${Math.round((listing.accessibility.housingCostRatio || 0) * 100)}%` : escapeHTML(listing.accessibility.reasons?.[0] || "Critérios não atendidos")}</small><div class="player-property-actions">${building ? actionButton({ action: "go_to", title: "Visitar", subtitle: building.name, targetKind: "building", targetId: building.id, icon: "⌖" }) : ""}${actionButton({ action: rental ? "rent_property" : "buy_property", title: rental ? "Alugar este imóvel" : "Comprar com financiamento", subtitle: eligible ? (listing.accessibility.transactionMode === "investment" ? "A propriedade entrará no patrimônio como investimento" : "Contrato e mudança serão processados") : listing.accessibility.reasons?.[0], targetKind: "building", targetId: listing.buildingId, listingId: listing.id, operation: rental ? "rent" : "buy", disabled: !eligible, cost: money(required) })}</div></article>`;
+    }).join("");
+    return `<div class="player-property-summary"><span><small>RECURSOS DO DOMICÍLIO</small><b>${money(portal.actor.balance)}</b></span><span><small>RENDA MENSAL</small><b>${money(portal.actor.monthlyIncome)}</b></span><span><small>CRÉDITO</small><b>${portal.actor.creditScore}</b></span><span><small>IMÓVEIS</small><b>${portal.ownedBuildings.length}</b></span></div>${activeContracts.length ? `<h4 class="player-panel-heading">Seus contratos</h4><div class="player-action-message">${activeContracts.map((contract) => `${contract.type === "mortgage" ? "Financiamento" : "Aluguel"}: ${money(contract.weeklyPayment)}/semana${contract.arrearsWeeks ? ` · ${contract.arrearsWeeks} atraso(s)` : ""}`).join("<br>")}</div>` : ""}<h4 class="player-panel-heading">Portal imobiliário · ${listings.length} anúncio(s)</h4><div class="player-property-list">${listingHTML || `<p class="player-action-message">Não há imóveis residenciais anunciados neste momento.</p>`}</div>`;
+  }
+
   function renderPanel(context, force = false) {
     const actor = context.person, active = session.activeCommand, signature = [panelTab, panelExpanded, actor.locationId, actor.homeId, actor.workplace, actor.education?.institution, actor.shift?.name, Math.floor(actor.money), active?.id, session.commandQueue.length, context.business?.id, context.business ? sim().isOpen(context.business) : ""].join("|");
     if (!force && signature === lastPanelSignature) return;
@@ -467,11 +564,11 @@ export function createGameplayController(options = {}) {
       ? `<i>⇄</i><span><b>Deslocamento em curso</b><small>${escapeHTML(sim().derivePersonAction(actor).text)}</small></span><em class="player-distance">${escapeHTML(actor.currentTrip.mode)}</em>`
       : `<i>${context.business ? "▣" : context.place?.type === "home" ? "⌂" : "⌖"}</i><span><b>${escapeHTML(context.place?.name || "Localização indisponível")}</b><small>${escapeHTML(context.place?.address ? formatAddress(context.place.address) : "Localização sendo atualizada")}</small></span><em class="player-distance">${context.nearbyPeople.length} pessoa(s)</em>`;
     const tabs = panel.querySelector("#playerActionTabs");
-    tabs.innerHTML = [["context", "Agora"], ["places", "Lugares"], ["people", "Pessoas"], ["career", "Trabalho e estudo"]].map(([id, label]) => `<button class="player-action-tab ${panelTab === id ? "player-active" : ""}" data-player-tab="${id}">${label}</button>`).join("");
+    tabs.innerHTML = [["context", "Agora"], ["places", "Lugares"], ["people", "Pessoas"], ["career", "Trabalho e estudo"], ["property", "Moradia"], ["objectives", "Objetivos"]].map(([id, label]) => `<button class="player-action-tab ${panelTab === id ? "player-active" : ""}" data-player-tab="${id}">${label}</button>`).join("");
     const content = panel.querySelector("#playerActionBody");
     content.innerHTML = inTransit && panelTab !== "places"
       ? `<p class="player-action-message">Você está em trânsito. Aguarde a chegada, escolha outro destino em “Lugares” ou cancele o trajeto atual.</p>`
-      : panelTab === "places" ? placesPanel(context) : panelTab === "people" ? peoplePanel(context) : panelTab === "career" ? careerPanel(context) : contextPanel(context);
+      : panelTab === "places" ? placesPanel(context) : panelTab === "people" ? peoplePanel(context) : panelTab === "career" ? careerPanel(context) : panelTab === "property" ? propertyPanel(context) : panelTab === "objectives" ? objectivesPanel(context) : contextPanel(context);
     if (active) content.insertAdjacentHTML("beforeend", `<p class="player-action-message">Em andamento: <b>${escapeHTML(active.actionId.replaceAll("_", " "))}</b>. ${session.commandQueue.length ? `${session.commandQueue.length} decisão(ões) na fila.` : ""}</p>${actionButton({ action: "cancel", title: "Cancelar ação atual", subtitle: "Interrompe a decisão em andamento", icon: "×" })}`);
   }
 
@@ -480,6 +577,7 @@ export function createGameplayController(options = {}) {
     pumpCommands();
     const current = sim(), context = current.playerContext?.(), actor = context?.person;
     if (!actor) return;
+    syncPlayerGoalsFromWorld(actor);
     const action = current.derivePersonAction(actor), place = context.place;
     hudRoot.querySelector("#playerAvatar").textContent = initials(actor.name);
     hudRoot.querySelector("#playerAvatar").style.setProperty("--player-avatar", actor.color || "#8e6b56");
@@ -503,9 +601,9 @@ export function createGameplayController(options = {}) {
       root.querySelector(".player-need-track").style.setProperty("--player-value", `${normalized}%`);
     });
     hudRoot.querySelector("#playerStateStrip").innerHTML = renderStates(actor);
-    const goal = session.player?.character?.goals?.find((item) => item.status === "active") || session.player?.character?.goals?.[0], definition = playerGoalCatalog.find((item) => item.id === goal?.id);
+    const goal = session.player?.character?.goals?.filter((item) => item.status === "active").sort((left, right) => (left.progress || 0) - (right.progress || 0))[0] || session.player?.character?.goals?.[0], definition = playerGoalCatalog.find((item) => item.id === goal?.id), nextMilestone = nextPlayerGoalMilestone(goal?.id, goal?.progress || 0);
     hudRoot.querySelector("#playerObjectiveName").textContent = definition?.name || "Viver sua própria história";
-    hudRoot.querySelector("#playerObjectiveText").textContent = definition?.description || "Suas escolhas constroem a trajetória do personagem.";
+    hudRoot.querySelector("#playerObjectiveText").textContent = goal?.status === "completed" ? "Aspiração concluída — este legado já faz parte da sua história." : definition ? `Próximo marco: ${nextMilestone[1]}.` : "Suas escolhas constroem a trajetória do personagem.";
     hudRoot.querySelector("#playerObjectiveProgress").style.setProperty("--player-value", `${clamp(goal?.progress || 0)}%`);
     renderPanel(context, force);
     const critical = `${actor.alive}:${actor.justice?.incarcerated}:${actor.medical?.admitted}:${actor.medical?.conditions?.map((condition) => condition.id).join(",")}`;
@@ -535,12 +633,26 @@ export function createGameplayController(options = {}) {
     const actor = player();
     if (!actor || target.id === actor.id) return;
     const samePlace = !actor.currentTrip && !target.currentTrip && actor.locationId === target.locationId, actions = [];
-    if (samePlace) [["talk", "Conversar"], ["compliment", "Elogiar"], ["support", "Oferecer apoio"], ["flirt", "Flertar"], ["argue", "Discutir"]].forEach(([kind, label]) => actions.push(actionButton({ action: "talk", title: `${label} com ${target.firstName}`, subtitle: "A relação reagirá ao contexto", targetKind: "person", targetId: target.id, kind })));
+    if (samePlace) {
+      const relationshipActions = sim().playerRelationshipActions?.(target.id) || [];
+      relationshipActions.forEach((entry) => actions.push(actionButton({
+        action: "talk",
+        title: entry.name,
+        subtitle: entry.available ? `${entry.description}${entry.acceptanceChance < .99 ? ` · receptividade estimada ${Math.round(entry.acceptanceChance * 100)}%` : ""}` : entry.reason,
+        targetKind: "person",
+        targetId: target.id,
+        kind: entry.id,
+        disabled: !entry.available,
+        icon: entry.category === "romance" ? "♡" : entry.category === "family" ? "⌂" : entry.category === "conflict" ? "!" : entry.category === "commitment" ? "◇" : "◌",
+      })));
+      if (!relationshipActions.length) [["talk", "Conversar"], ["compliment", "Elogiar"], ["support", "Oferecer apoio"], ["flirt", "Flertar"], ["argue", "Discutir"]].forEach(([kind, label]) => actions.push(actionButton({ action: "talk", title: `${label} com ${target.firstName}`, subtitle: "A relação reagirá ao contexto", targetKind: "person", targetId: target.id, kind })));
+    }
     else if (!target.currentTrip && target.locationId) {
       const place = sim().buildings.find((building) => building.id === target.locationId);
       if (place) actions.push(actionButton({ action: "go_to", title: `Ir ao encontro de ${target.firstName}`, subtitle: place.name, targetKind: "building", targetId: place.id }));
     }
-    root.insertAdjacentHTML("afterbegin", `<section data-player-world-actions><small>INTERAGIR COMO ${escapeHTML(actor.firstName.toUpperCase())}</small><div class="player-action-grid">${actions.join("") || "<p class='player-action-message'>Essa pessoa está em deslocamento ou indisponível agora.</p>"}</div></section>`);
+    const link = sim().relationshipsOf(actor).find((entry) => entry.person.id === target.id)?.link, stage = link?.lifecycle?.stage?.replaceAll("_", " ") || link?.type || "ainda não se conhecem";
+    root.insertAdjacentHTML("afterbegin", `<section data-player-world-actions><small>INTERAGIR COMO ${escapeHTML(actor.firstName.toUpperCase())}</small><p class="player-action-message">Vínculo atual: <b>${escapeHTML(stage)}</b>${link ? ` · afinidade ${Math.round(link.affinity || 0)} · confiança ${Math.round(link.trust || 0)}% · tensão ${Math.round(link.tension || 0)}%` : ""}. A outra pessoa pode aceitar, recusar ou pedir mais tempo.</p><div class="player-action-grid">${actions.join("") || "<p class='player-action-message'>Essa pessoa está em deslocamento ou indisponível agora.</p>"}</div></section>`);
   }
 
   function mount(host = document.querySelector("#app")) {
@@ -580,6 +692,12 @@ export function createGameplayController(options = {}) {
       if (origin) { syncDraftFromForm(); draft.originId = origin.dataset.origin; renderCreator(); return; }
       const trait = event.target.closest("[data-trait]");
       if (trait) { syncDraftFromForm(); const value = trait.dataset.trait, has = draft.traits.includes(value); if (has) draft.traits = draft.traits.filter((item) => item !== value); else if (draft.traits.length < 4) draft.traits = [...draft.traits, value]; else { showSetupMessage("Escolha no máximo quatro características."); return; } renderCreator(); return; }
+      const valueOption = event.target.closest("[data-value]");
+      if (valueOption) { syncDraftFromForm(); const value = valueOption.dataset.value, has = draft.values.includes(value); if (has) draft.values = draft.values.filter((item) => item !== value); else if (draft.values.length < 3) draft.values = [...draft.values, value]; else { showSetupMessage("Escolha no máximo três valores centrais."); return; } renderCreator(); return; }
+      const interestOption = event.target.closest("[data-interest]");
+      if (interestOption) { syncDraftFromForm(); const value = interestOption.dataset.interest, has = draft.interests.includes(value); if (has) draft.interests = draft.interests.filter((item) => item !== value); else if (draft.interests.length < 5) draft.interests = [...draft.interests, value]; else { showSetupMessage("Escolha no máximo cinco interesses."); return; } renderCreator(); return; }
+      const relationshipModel = event.target.closest("[data-relationship-model]");
+      if (relationshipModel) { syncDraftFromForm(); draft.relationshipPreferences = { ...(draft.relationshipPreferences || {}), model: relationshipModel.dataset.relationshipModel }; renderCreator(); return; }
       const goal = event.target.closest("[data-goal]");
       if (goal) { syncDraftFromForm(); const value = goal.dataset.goal, has = draft.goalIds.includes(value); if (has) draft.goalIds = draft.goalIds.filter((item) => item !== value); else if (draft.goalIds.length < 3) draft.goalIds = [...draft.goalIds, value]; else { showSetupMessage("Escolha no máximo três objetivos."); return; } renderCreator(); return; }
       if (event.target.closest("[data-setup-resume]")) hideSetup(true);
@@ -591,6 +709,10 @@ export function createGameplayController(options = {}) {
       if (event.target.closest("#playerActionClose")) { panelExpanded = !panelExpanded; lastPanelSignature = ""; render(true); }
     });
     document.addEventListener("click", (event) => {
+      const openPerson = event.target.closest("[data-player-open-person]");
+      if (openPerson) { const person = sim()?.people.find((item) => item.id === openPerson.dataset.playerOpenPerson); if (person) options.onOpenPerson?.(person); return; }
+      const locatePerson = event.target.closest("[data-player-locate-person]");
+      if (locatePerson) { const person = sim()?.people.find((item) => item.id === locatePerson.dataset.playerLocatePerson); if (person) options.onLocatePerson?.(person); return; }
       const action = event.target.closest("[data-player-action]");
       if (action) handleActionElement(action);
     });

@@ -56,6 +56,7 @@ import {
   chooseSocialInteraction,
   decayRelationship,
   ensureRelationshipDepth,
+  socialCompatibility,
 } from "./socialDynamics.js";
 import {
   applyRelationshipExperience,
@@ -91,6 +92,12 @@ import {
 import { createRealEstateDynamics, runRealEstateDynamicsWeek, summarizeRealEstateDynamics } from "./realEstateDynamics.js";
 import { createSimulationPersonPatch, validateCharacterDraft } from "./gameplay.js";
 import { commitCityDevelopment, createCityDevelopmentState, forecastCityDevelopment, planCityDevelopment, stageSummary } from "./cityDevelopment.js";
+import {
+  listRelationshipActions,
+  normalizeRelationshipActionId,
+  relationshipActionById,
+  resolveRelationshipAction,
+} from "./relationshipActions.js";
 
 const pick = (a) => a[Math.floor(Math.random() * a.length)];
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
@@ -184,7 +191,7 @@ export class Simulation {
     this.minute = 6 * 60 + 30;
     this.day = 0;
     this.week = 1;
-    this.speed = this.gameMode === "gameplay" ? 24 : 96;
+    this.speed = this.gameMode === "gameplay" ? 1 : 24;
     this.money = 248600;
     this.logs = [];
     this.newsroom = { articles: [], publishedByWeek: {}, publishedBySectionWeek: {}, updated: 0, sections: ["Cidade", "Política", "Segurança", "Justiça", "Economia", "Trabalho", "Habitação", "Sociedade", "Saúde", "Mobilidade", "Meio Ambiente", "Cultura"] };
@@ -621,6 +628,15 @@ export class Simulation {
       personalGoals: (character.goals || []).map((goal) => ({ ...goal, milestones: [...(goal.milestones || [])] })),
       history: [{ week: this.week, text: temporary ? "Chegou a Vila Esperança para começar uma nova vida." : `Começou uma nova trajetória em ${home?.name || "Vila Esperança"}.` }],
     });
+    if (patch.playerPreferences) {
+      template.personality = {
+        ...template.personality,
+        values: patch.playerPreferences.values?.length ? [...patch.playerPreferences.values] : [...(template.personality?.values || [])],
+        interests: patch.playerPreferences.interests?.length ? [...patch.playerPreferences.interests] : [...(template.personality?.interests || [])],
+      };
+      if (patch.playerPreferences.relationships?.desiredChildren != null) template.reproductive.childrenDesired = Number(patch.playerPreferences.relationships.desiredChildren);
+      template.relationshipProfile = null;
+    }
     template.lifeCourse = initializeLifeCourse(template, this.week);
     template.lifeStage = lifeStageForAge(template.age).id;
     template.education = template.education || emptyEducation();
@@ -3703,7 +3719,9 @@ export class Simulation {
     const person = this.player();
     if (!person) return { ok: false, reason: "personagem não encontrado" };
     const active = person.playerControl?.activeAction, travel = person.playerControl?.travelCommand;
+    if (active?.type === "relationship") this.clearPlayerRelationshipEngagement(active);
     if (person.currentTrip) this.abandonTrip(person, reason);
+    if (active?.type === "relationship") this.clearSocialContext(person);
     person.playerControl.activeAction = null;
     person.playerControl.travelCommand = null;
     person.activity = "Aguardando sua decisão";
@@ -3752,7 +3770,7 @@ export class Simulation {
     if (!this.isPlayerControlled(person) || !person.playerControl) return;
     const action = person.playerControl.activeAction;
     if (!action || this.absoluteMinute() < action.endsAt) return;
-    let message = `${action.label} foi concluído.`;
+    let message = `${action.label} foi concluído.`, commandSucceeded = true, resultDetails = { type: action.type, durationMinutes: action.durationMinutes }, relationshipResult = null;
     if (action.type === "work") {
       const hours = action.durationMinutes / 60, payment = Math.round((person.hourlyWage || 0) * hours * 100) / 100, business = this.businessOf(person);
       person.money += payment;
@@ -3777,13 +3795,20 @@ export class Simulation {
       message = "Descanso concluído; energia e conforto melhoraram.";
     } else if (action.type === "leisure") {
       person.happiness = clamp(person.happiness + 3, 0, 100);
+    } else if (action.type === "relationship") {
+      relationshipResult = this.resolvePlayerRelationshipAction(person, action);
+      commandSucceeded = relationshipResult.ok;
+      message = relationshipResult.message || relationshipResult.reason || "A interação não pôde ser concluída.";
+      resultDetails = { ...resultDetails, ...(relationshipResult.details || {}), accepted: relationshipResult.accepted ?? null };
     }
-    person.actionLog.unshift({ week: this.week, day: this.day, time: this.time, activity: message, place: this.buildings.find((building) => building.id === person.locationId)?.name || "Cidade" });
-    person.actionLog = person.actionLog.slice(0, 24);
+    if (!relationshipResult?.logged) {
+      person.actionLog.unshift({ week: this.week, day: this.day, time: this.time, activity: message, place: this.buildings.find((building) => building.id === person.locationId)?.name || "Cidade" });
+      person.actionLog = person.actionLog.slice(0, 24);
+    }
     person.playerControl.activeAction = null;
     person.activity = "Aguardando sua decisão";
     person.activityCategory = "leisure";
-    this.setPlayerCommandResult(person, action.commandId, true, message, { type: action.type, durationMinutes: action.durationMinutes });
+    this.setPlayerCommandResult(person, action.commandId, commandSucceeded, message, resultDetails);
   }
   playerPurchase(businessId, productName, options = {}) {
     const person = this.player(), business = this.businesses.find((candidate) => candidate.id === businessId);
@@ -3799,32 +3824,172 @@ export class Simulation {
     if (ok) this.setPlayerCommandResult(person, options.commandId, true, `${productName} adquirido em ${business.name}.`, { businessId, productName, price: transaction.price });
     return ok ? { ok: true, transaction } : { ok: false, reason: "a compra não pôde ser concluída" };
   }
+  relationshipActionContext(actor, target, link = null) {
+    if (!actor || !target) return null;
+    link ||= this.indexedRelationship(actor, target);
+    if (link) ensureRelationshipDepth(link);
+    const kinship = this.kinship?.relationBetween(actor, target, { includeAffinity: true }) || null;
+    // O índice de parentesco também descreve cônjuges como `partner`. Eles não
+    // podem ser tratados como parentes aqui, pois isso bloquearia todo o
+    // catálogo romântico do próprio casal.
+    const isFamily = link?.type === "família" || Boolean(kinship && kinship.kind !== "partner");
+    const lifecycle = link && this.isRomanticLink(link) ? this.ensureRelationshipLifecycle(link, actor, target) : null;
+    const compatibility = socialCompatibility(actor, target, link);
+    const defaultAttraction = clamp((compatibility - 25) * .55 + ((target.genetics?.charisma || 50) - 50) * .08, 0, 62);
+    const actorView = link?.views?.[actor.id] || { affection: link?.affinity || 0, trust: link?.trust || 0, attraction: lifecycle?.metrics?.attraction || defaultAttraction, resentment: 0 };
+    const targetView = link?.views?.[target.id] || { affection: link?.affinity || 0, trust: link?.trust || 0, attraction: lifecycle?.metrics?.attraction || defaultAttraction, resentment: 0 };
+    const canFormRomance = this.canFormRomance(actor, target), orientationCompatible = this.orientationCompatible(actor, target);
+    const place = this.buildings.find((building) => building.id === actor.locationId), hour = this.minute / 60;
+    const isCoworker = Boolean(actor.businessId && actor.businessId === target.businessId) || (!actor.education?.enrolled && !target.education?.enrolled && actor.workplace && actor.workplace !== "—" && actor.workplace === target.workplace);
+    const isClassmate = Boolean(actor.education?.enrolled && target.education?.enrolled && actor.education.institution && actor.education.institution === target.education.institution && actor.education.stage === target.education.stage);
+    const actorHome = this.buildings.find((building) => building.id === actor.homeId), targetHome = this.buildings.find((building) => building.id === target.homeId);
+    const isNeighbor = Boolean(actorHome?.districtId && actorHome.districtId === targetHome?.districtId);
+    return {
+      actor, target, link, lifecycle, stage: lifecycle?.stage || null,
+      metrics: lifecycle?.metrics || {
+        trust: link?.trust || 8, tension: link?.tension || 0, intimacy: link?.familiarity || 10,
+        attraction: ((actorView.attraction || 0) + (targetView.attraction || 0)) / 2,
+        commitment: 8, satisfaction: clamp(50 + (link?.affinity || 0) * .35, 0, 100),
+        communication: 42, repairCapacity: 42,
+      },
+      actorView, targetView, compatibility, kinship, isFamily, isCoworker, isClassmate, isNeighbor,
+      isRomantic: Boolean(lifecycle), romanceAllowed: canFormRomance && orientationCompatible,
+      romanceBlockedReason: !canFormRomance ? "A idade ou o parentesco torna esta aproximação inadequada." : !orientationCompatible ? "Não existe compatibilidade de orientação recíproca." : null,
+      canBeginRomance: Boolean(lifecycle) || this.canBeginRomanticConnection(actor, target),
+      samePlace: Boolean(!actor.currentTrip && !target.currentTrip && actor.locationId && actor.locationId === target.locationId),
+      sameHousehold: this.sharesHousehold(actor, target),
+      atHome: Boolean(place && (place.id === actor.homeId || place.id === target.homeId)),
+      mealTime: (hour >= 7 && hour <= 10) || (hour >= 11 && hour <= 14.5) || (hour >= 18 && hour <= 22),
+      actorBusy: Boolean(actor.currentTrip || actor.playerControl?.activeAction),
+      targetBusy: Boolean(target.currentTrip || ["work", "study", "institutional"].includes(target.activityCategory) || target.relationshipEngagement?.endsAt > this.absoluteMinute()),
+      place, hour, week: this.week, day: this.day, minute: this.minute, absoluteMinute: this.absoluteMinute(),
+    };
+  }
+  playerRelationshipActions(targetId) {
+    const actor = this.player(), target = this.people.find((candidate) => candidate.id === targetId);
+    if (!actor?.alive || !target?.alive || actor.id === target?.id) return [];
+    return listRelationshipActions(this.relationshipActionContext(actor, target));
+  }
+  clearPlayerRelationshipEngagement(action) {
+    const target = this.people.find((candidate) => candidate.id === action?.targetId);
+    if (target?.relationshipEngagement?.id === action?.id) {
+      target.relationshipEngagement = null;
+      target.needsDestinationDecision = true;
+    }
+    if (target?.socialContext?.interactionId === action?.id) this.clearSocialContext(target);
+  }
+  applyRelationshipPersonEffects(person, effects = {}) {
+    if (!person) return;
+    person.happiness = clamp(person.happiness + (effects.happiness || 0), 0, 100);
+    person.energy = clamp(person.energy + (effects.energy || 0), 0, 100);
+    if (person.needs) person.needs.social = clamp(person.needs.social + (effects.social || 0), 0, 100);
+    if (person.mind?.emotional) person.mind = { ...person.mind, emotional: { ...person.mind.emotional, stress: clamp(person.mind.emotional.stress + (effects.stress || 0), 0, 100) }, revision: (person.mind.revision || 0) + 1 };
+    else if (person.mind?.state) person.mind.state.stress = clamp(person.mind.state.stress + (effects.stress || 0), 0, 100);
+  }
+  applyRelationshipViewEffects(link, person, effects = {}) {
+    if (!link || !person) return;
+    link.views ||= {};
+    const previous = link.views[person.id] || { affection: link.affinity || 0, trust: link.trust || 0, attraction: 0, resentment: 0 };
+    link.views[person.id] = {
+      affection: clamp((previous.affection || 0) + (effects.affection || 0), -100, 100),
+      trust: clamp((previous.trust || 0) + (effects.trust || 0), 0, 100),
+      attraction: clamp((previous.attraction || 0) + (effects.attraction || 0), 0, 100),
+      resentment: clamp((previous.resentment || 0) + (effects.resentment || 0), 0, 100),
+    };
+  }
+  resolvePlayerRelationshipAction(person, action) {
+    const target = this.people.find((candidate) => candidate.id === action?.targetId), place = this.buildings.find((building) => building.id === person?.locationId);
+    const fail = (reason) => {
+      this.clearPlayerRelationshipEngagement(action);
+      this.clearSocialContext(person);
+      person.actionLog.unshift({ week: this.week, day: this.day, time: this.time, activity: reason, place: place?.name || "Cidade", peopleIds: target ? [target.id] : [], interactionId: action?.relationshipKind || null });
+      person.actionLog = person.actionLog.slice(0, 24);
+      return { ok: false, accepted: null, message: reason, logged: true, details: { targetId: action?.targetId || null, kind: action?.relationshipKind || null } };
+    };
+    if (!person?.alive || !target?.alive || target.id === person.id) return fail("A pessoa não estava mais disponível para concluir a interação.");
+    if (person.currentTrip || target.currentTrip || person.locationId !== target.locationId || person.locationId !== action.placeId) return fail(`${target.firstName} deixou o local antes que a interação fosse concluída.`);
+    let link = this.indexedRelationship(person, target);
+    const initialContext = this.relationshipActionContext(person, target, link);
+    link ||= this.ensureSocialRelationship(person, target, { isFamily: initialContext.isFamily, isCoworker: initialContext.isCoworker, isClassmate: initialContext.isClassmate, isNeighbor: initialContext.isNeighbor });
+    if (!link) return fail("Sua rede social está cheia e este novo contato não pôde ser registrado.");
+    const context = { ...this.relationshipActionContext(person, target, link), actorBusy: false, targetBusy: false };
+    const outcome = resolveRelationshipAction(action.relationshipKind, context, Math.random);
+    if (!outcome.ok) return fail(outcome.reason || "A interação não pôde ser concluída.");
+    const resolvedKind = normalizeRelationshipActionId(action.relationshipKind);
+    applyInteractionEffects(person, target, link, outcome.interaction, { week: this.week, day: this.day, time: this.time, placeId: place?.id || null });
+    this.applyRelationshipViewEffects(link, person, outcome.effects.actorView);
+    this.applyRelationshipViewEffects(link, target, outcome.effects.targetView);
+    this.applyRelationshipPersonEffects(person, outcome.effects.actor);
+    this.applyRelationshipPersonEffects(target, outcome.effects.target);
+    if (context.isFamily) {
+      const bond = this.ensureFamilyBond(person, target, context.kinship);
+      if (bond) {
+        bond.proximity = clamp(bond.proximity + (outcome.effects.link.affinity || 0) * .5, 0, 100);
+        bond.trust = clamp(bond.trust + (outcome.effects.link.trust || 0) * .45, 0, 100);
+        bond.tension = clamp(bond.tension + (outcome.effects.link.tension || 0) * .55, 0, 100);
+        bond.lastContactWeek = this.week;
+      }
+    }
+    if (outcome.startRomance) this.beginRomanticConnection(link, person, target, { experience: outcome.lifecycleExperience, historyText: outcome.message });
+    else if (outcome.lifecycleExperience && link.lifecycle) this.recordRelationshipExperience(link, { ...outcome.lifecycleExperience, placeId: place?.id || null });
+    if (outcome.transition && link.lifecycle) {
+      const from = link.lifecycle.stage;
+      link.lifecycle = transitionRelationshipStage(link.lifecycle, outcome.transition.to, { people: [person, target], week: this.week, day: this.day, placeId: place?.id || null, text: outcome.message });
+      this.applyRelationshipTransition(link, person, target, { ...outcome.transition, from, to: link.lifecycle.stage });
+      this.relationshipSystem.playerPendingDecisions = (this.relationshipSystem.playerPendingDecisions || []).filter((pending) => pending.relationshipId !== link.id);
+    }
+    if (outcome.accepted && ["discuss_children", "try_for_child", "pause_trying"].includes(resolvedKind)) {
+      this.relationshipSystem.playerPendingDecisions = (this.relationshipSystem.playerPendingDecisions || []).filter((pending) => pending.relationshipId !== link.id || pending.kind !== "family_planning");
+    }
+    link.relationshipActionHistory ||= [];
+    link.relationshipActionHistory.unshift({ kind: resolvedKind, accepted: outcome.accepted, week: this.week, day: this.day, minute: this.minute, absoluteMinute: this.absoluteMinute() });
+    link.relationshipActionHistory = link.relationshipActionHistory.slice(0, 24);
+    this.clearPlayerRelationshipEngagement(action);
+    const interactionId = action.id || `player-relationship:${this.absoluteMinute()}`, expiresAt = this.absoluteMinute() + 50;
+    [person, target].forEach((participant, index) => {
+      const other = index ? person : target;
+      participant.socialInteractionAt = this.absoluteMinute();
+      participant.socialContext = { interactionId, counterpartId: other.id, personIds: [participant.id, other.id], placeId: place?.id || null, label: outcome.message, tone: outcome.interaction.tone, sinceWeek: this.week, sinceDay: this.day, sinceMinute: this.minute, expiresAt };
+      participant.actionLog.unshift({ week: this.week, day: this.day, time: this.time, activity: outcome.message, place: place?.name || "Cidade", peopleIds: [other.id], interactionId: outcome.interaction.id });
+      participant.actionLog = participant.actionLog.slice(0, 24);
+      this.recordCharacterMemory(participant, { kind: outcome.accepted ? (outcome.interaction.tone === "negative" ? "conflito de relacionamento" : outcome.interaction.tone === "support" ? "apoio e reparo" : "encontro de relacionamento") : "limite interpessoal", summary: outcome.message, actorIds: [other.id], placeId: place?.id || null, valence: outcome.interaction.memory.valence, importance: outcome.interaction.memory.salience, stressImpact: outcome.effects[index ? "target" : "actor"]?.stress || 0, core: Boolean(outcome.interaction.notable), tags: ["player", "relacionamento", resolvedKind] });
+      this.queueCharacterEvent(participant, { kind: "social", summary: outcome.message, valence: outcome.interaction.memory.valence, importance: outcome.interaction.memory.salience, stressImpact: outcome.effects[index ? "target" : "actor"]?.stress || 0 });
+    });
+    this.characterSystem.interactions++;
+    if (outcome.interaction.tone === "support") this.characterSystem.supportiveInteractions++;
+    if (outcome.interaction.tone === "negative") this.characterSystem.conflicts++;
+    if (resolvedKind === "reconcile" && outcome.accepted) this.characterSystem.reconciliations++;
+    this.characterSystem.revision++;
+    return { ok: true, accepted: outcome.accepted, message: outcome.message, logged: true, interaction: outcome.interaction, link, details: { targetId: target.id, kind: resolvedKind, accepted: outcome.accepted, reciprocal: outcome.reciprocal, chance: outcome.chance, affinity: link.affinity, trust: link.trust, tension: link.tension, relationshipStage: link.lifecycle?.stage || null } };
+  }
   playerInteractWithPerson(targetId, kind = "talk", options = {}) {
     const person = this.player(), target = this.people.find((candidate) => candidate.id === targetId), place = this.buildings.find((building) => building.id === person?.locationId);
     if (!person?.alive || !target?.alive || target.id === person.id) return { ok: false, reason: "pessoa indisponível" };
+    if (person.justice?.incarcerated || person.medical?.admitted) return { ok: false, reason: "essa interação não está disponível na situação atual" };
     if (person.currentTrip || target.currentTrip || person.locationId !== target.locationId) return { ok: false, reason: "vocês precisam estar no mesmo local" };
-    if (kind === "flirt" && (person.age < 18 || target.age < 18 || !this.canFormRomance(person, target) || !this.orientationCompatible(person, target))) return { ok: false, reason: "o flerte não é apropriado ou compatível neste contexto" };
-    const interaction = this.performSocialInteraction(person, target, place, { macro: false }), link = this.ensureSocialRelationship(person, target, {});
-    if (!interaction || !link) return { ok: false, reason: "a interação não pôde acontecer agora" };
-    const effects = {
-      talk: { affinity: 1, trust: 1, tension: -1, label: `Você conversou com ${target.firstName}.` },
-      compliment: { affinity: 5, trust: 1.5, tension: -1, label: `${target.firstName} recebeu bem o elogio.` },
-      support: { affinity: 3, trust: 6, tension: -3, label: `Você ofereceu apoio a ${target.firstName}.` },
-      flirt: { affinity: 4, trust: 1, tension: 0, attraction: 10, label: `Você flertou com ${target.firstName}.` },
-      argue: { affinity: -6, trust: -4, tension: 12, label: `Você discutiu com ${target.firstName}.` },
-    }[kind] || { affinity: 1, trust: 1, tension: 0, label: `Você interagiu com ${target.firstName}.` };
-    link.affinity = clamp((link.affinity || 0) + effects.affinity, -100, 100);
-    link.trust = clamp((link.trust || 0) + effects.trust, 0, 100);
-    link.tension = clamp((link.tension || 0) + effects.tension, 0, 100);
-    if (effects.attraction) {
-      link.views ||= {};
-      link.views[person.id] ||= { affection: link.affinity, trust: link.trust, attraction: 0, resentment: 0 };
-      link.views[person.id].attraction = clamp((link.views[person.id].attraction || 0) + effects.attraction, 0, 100);
-    }
-    person.needs.social = clamp(person.needs.social + (kind === "argue" ? -3 : 9), 0, 100);
-    target.needs.social = clamp(target.needs.social + (kind === "argue" ? -2 : 5), 0, 100);
-    this.setPlayerCommandResult(person, options.commandId, true, effects.label, { targetId, kind, affinity: link.affinity, trust: link.trust, tension: link.tension });
-    return { ok: true, interaction, link, message: effects.label };
+    if (person.playerControl?.activeAction) return { ok: false, reason: "conclua ou cancele a ação atual" };
+    if (target.relationshipEngagement?.endsAt > this.absoluteMinute() && target.relationshipEngagement.actorId !== person.id) return { ok: false, reason: `${target.firstName} já está em outra interação.` };
+    const requestedKind = normalizeRelationshipActionId(kind), initialContext = this.relationshipActionContext(person, target);
+    let descriptor = relationshipActionById(requestedKind, initialContext);
+    if (!descriptor) return { ok: false, reason: "interação desconhecida" };
+    if (!descriptor.available) return { ok: false, reason: descriptor.reason };
+    const link = initialContext.link || this.ensureSocialRelationship(person, target, { isFamily: initialContext.isFamily, isCoworker: initialContext.isCoworker, isClassmate: initialContext.isClassmate, isNeighbor: initialContext.isNeighbor });
+    if (!link) return { ok: false, reason: "sua rede social está cheia para registrar um novo contato" };
+    descriptor = relationshipActionById(requestedKind, this.relationshipActionContext(person, target, link));
+    if (!descriptor?.available) return { ok: false, reason: descriptor?.reason || "interação indisponível" };
+    const commandId = options.commandId || null, id = commandId || uid("player-relationship"), duration = Math.max(10, descriptor.durationMinutes || 20);
+    const action = { id, commandId, type: "relationship", relationshipKind: requestedKind, targetId: target.id, linkId: link.id, label: `${descriptor.name} com ${target.firstName}`, category: "social", placeId: place?.id || null, startedAt: this.absoluteMinute(), endsAt: this.absoluteMinute() + duration, durationMinutes: duration, interruptible: true };
+    person.playerControl.activeAction = action;
+    person.activity = action.label;
+    person.activityCategory = "social";
+    person.actionPriority = 100;
+    target.relationshipEngagement = { id, actorId: person.id, placeId: place?.id || null, endsAt: action.endsAt, label: action.label };
+    target.target = null;
+    target.destinationId = null;
+    target.path = [];
+    target.needsDestinationDecision = false;
+    target.socialContext = { interactionId: id, counterpartId: person.id, personIds: [target.id, person.id], placeId: place?.id || null, label: `${target.firstName} está em uma interação com ${person.firstName}.`, tone: "pending", sinceWeek: this.week, sinceDay: this.day, sinceMinute: this.minute, expiresAt: action.endsAt };
+    return { ok: true, pending: true, action, relationshipAction: descriptor, link };
   }
   playerApplyForJob(businessId, role, options = {}) {
     const person = this.player(), business = this.businesses.find((candidate) => candidate.id === businessId);
@@ -4245,12 +4410,13 @@ export class Simulation {
       { label: "autonomia com presença", score: openness + stability * .2 },
       { label: "gestos e lembranças", score: openness * .65 + extraversion * .35 },
     ].sort((a, b) => b.score - a.score).slice(0, 2).map((entry) => entry.label);
-    const nonMonogamyPreference = openness >= 76 && conscientiousness < 58 && (person.personality?.riskTolerance || 50) >= 62;
+    const chosenRelationshipModel = person.playerPreferences?.relationships?.model;
+    const nonMonogamyPreference = chosenRelationshipModel === "nao_monogamico_consensual" || (!chosenRelationshipModel && openness >= 76 && conscientiousness < 58 && (person.personality?.riskTolerance || 50) >= 62);
     person.relationshipProfile = {
       attachmentStyle,
       conflictStyle,
       affectionPriorities,
-      relationshipModelPreference: nonMonogamyPreference ? "não monogamia consensual" : "monogamia",
+      relationshipModelPreference: nonMonogamyPreference ? "não monogamia consensual" : chosenRelationshipModel === "a_definir" ? "a definir" : "monogamia",
       needs: {
         affection: Math.round(clamp(42 + agreeableness * .38, 0, 100)),
         communication: Math.round(clamp(35 + extraversion * .3 + agreeableness * .25, 0, 100)),
@@ -4259,8 +4425,8 @@ export class Simulation {
       },
       parenthood: {
         desiredChildren: person.reproductive?.childrenDesired ?? 0,
-        desire: Math.round(clamp((person.reproductive?.childrenDesired || 0) * 23 + agreeableness * .22 + (person.personality?.values || []).includes("Família") * 15, 0, 100)),
-        timing: person.age < 22 ? "mais tarde" : person.age > 43 ? "decisão sensível ao tempo" : "a conversar",
+        desire: Math.round(clamp((person.reproductive?.childrenDesired || 0) * 23 + agreeableness * .22 + (person.personality?.values || []).includes("família") * 15, 0, 100)),
+        timing: person.playerPreferences?.relationships?.familyTiming || (person.age < 22 ? "mais tarde" : person.age > 43 ? "decisão sensível ao tempo" : "a conversar"),
       },
     };
     return person.relationshipProfile;
@@ -4292,6 +4458,7 @@ export class Simulation {
       familyPlanningConversations: 0,
       parentingSupport: 0,
       pendingCohabitation: [],
+      playerPendingDecisions: [],
       transitions: [],
     };
     this.people.forEach((person) => this.relationshipProfileFor(person));
@@ -5103,7 +5270,7 @@ export class Simulation {
     if (committed.some(({ link }) => link.lifecycle?.agreements?.relationshipModel !== "nao_monogamico_consensual")) return false;
     return this.romanticLinksOf(a, { activeOnly: true }).length < 3 && this.romanticLinksOf(b, { activeOnly: true }).length < 3;
   }
-  beginRomanticConnection(link, a, b) {
+  beginRomanticConnection(link, a, b, options = {}) {
     link.lifecycle = initializeRelationshipLifecycle(a, b, {
       id: `relationship:${link.id}`,
       stage: "paquera",
@@ -5117,10 +5284,12 @@ export class Simulation {
       },
     });
     link.domain = "romantic";
-    this.recordRelationshipExperience(link, { kind: "flerte", text: "A amizade ganhou interesse afetivo e uma paquera começou.", valence: 58, importance: 48, milestone: true });
+    this.recordRelationshipExperience(link, options.experience || { kind: "flerte", text: "A amizade ganhou interesse afetivo e uma paquera começou.", valence: 58, importance: 48, milestone: true });
     this.relationshipSystem.flirtations++;
     this.demographics.casualRelationships++;
-    link.history.unshift({ week: this.week, text: "A proximidade se transformou em paquera." });
+    const historyText = options.historyText || "A proximidade se transformou em paquera.";
+    if (link.history[0]?.text !== historyText) link.history.unshift({ week: this.week, text: historyText });
+    link.history = link.history.slice(0, 30);
   }
   closeCompetingRomances(person, keptLink) {
     this.romanticLinksOf(person, { activeOnly: true })
@@ -5129,6 +5298,7 @@ export class Simulation {
         link.lifecycle = transitionRelationshipStage(link.lifecycle, "encerrado", { people: [person, other], week: this.week, text: `${person.firstName} assumiu outro vínculo exclusivo e encerrou esta aproximação.` });
         this.syncRelationshipLifecycle(link, person, other);
         link.history.unshift({ week: this.week, text: "A aproximação foi encerrada antes de se tornar compromisso." });
+        link.history = link.history.slice(0, 30);
       });
   }
   scheduleRelationshipMilestoneEvent(link, a, b, type) {
@@ -5195,6 +5365,7 @@ export class Simulation {
     this.syncRelationshipLifecycle(link, a, b);
     const message = `${a.name} e ${b.name}: ${label.toLowerCase()} — ${transition.reason}.`;
     link.history.unshift({ week: this.week, text: message });
+    link.history = link.history.slice(0, 30);
     this.log(positive ? "relacionamento" : to === "divorciado" ? "divórcio" : "separação", message, positive ? "social" : "civic");
     [a, b].forEach((person, index) => this.recordCharacterMemory(person, {
       kind: positive ? "relacionamento" : "separação",
@@ -5286,6 +5457,57 @@ export class Simulation {
       else if (this.housingSystem.construction.length < 3) this.startConstruction();
     });
   }
+  relationshipWeeklyEvaluationContext(link, a, b) {
+    const completedWeek = Math.max(0, this.week - 1), currentExperiences = link.lifecycle.experiences.filter((experience) => experience.week === completedWeek);
+    const positive = currentExperiences.filter((experience) => experience.tone === "positive" || experience.tone === "support" || experience.valence > 15).length;
+    const familyA = this.familyOf(a), familyB = this.familyOf(b);
+    const financialStress = clamp((familyA?.arrears || 0) * 14 + (familyB?.arrears || 0) * 14 + (a.money < 0 ? 18 : 0) + (b.money < 0 ? 18 : 0), 0, 100);
+    const carrier = [a, b].find((person) => person.reproductive?.canGestate && person.age <= 48);
+    const conceptionChance = carrier ? clamp((carrier.reproductive.fertility / 100) * (carrier.health / 100) * .22, .015, .24) : 0;
+    const sharedHousehold = this.sharesHousehold(a, b), sharedBuilding = a.homeId && a.homeId === b.homeId;
+    return {
+      week: this.week,
+      weeklyContact: link.lastInteractionWeek === completedWeek ? Math.max(1, currentExperiences.length) : sharedHousehold ? 3 : sharedBuilding ? 1 : 0,
+      qualityTime: clamp(positive * 18 + (sharedHousehold ? 18 : sharedBuilding ? 5 : 0), 0, 100),
+      financialStress,
+      parentingStress: link.lifecycle.familyPlanning.parentingLoad,
+      externalStress: ((a.mind?.emotional?.stress || 0) + (b.mind?.emotional?.stress || 0)) / 2,
+      conceptionChance,
+    };
+  }
+  refreshPlayerRelationshipPlanning(link, a, b) {
+    const lifecycle = this.ensureRelationshipLifecycle(link, a, b), planning = lifecycle.familyPlanning, sharedChildren = this.sharedChildrenOf(a, b);
+    const household = this.familyOf(a), income = household ? this.householdIncome(household) : 0, home = this.buildings.find((building) => building.id === a.homeId), intentions = {};
+    [a, b].forEach((person) => {
+      const profile = this.relationshipProfileFor(person), current = planning.intentions[person.id] || {};
+      const healthReadiness = person.health * .28 + (person.age >= 22 && person.age <= 42 ? 24 : person.age <= 48 ? 10 : 0);
+      const stabilityReadiness = (person.personality?.dimensions?.stability || 50) * .18 + (income > Math.max(800, (household?.housingCost || 0) * 2) ? 18 : 4) + (home && home.occupied < home.capacity ? 14 : 0);
+      intentions[person.id] = { ...current, desire: profile.parenthood.desire, desiredChildren: person.reproductive?.childrenDesired || 0, readiness: clamp(healthReadiness + stabilityReadiness - sharedChildren.length * 5, 0, 100), preferredTiming: current.preferredTiming || (person.age < 22 ? "mais_tarde" : "em_breve") };
+    });
+    const livedCareLoad = ((a.parenting?.careLoad || 0) + (b.parenting?.careLoad || 0)) / 2;
+    link.lifecycle = normalizeRelationshipLifecycle({ ...lifecycle, familyPlanning: { ...planning, intentions, childrenIds: sharedChildren, desiredHouseholdChildren: Math.round((intentions[a.id].desiredChildren + intentions[b.id].desiredChildren) / 2), parentingLoad: clamp(sharedChildren.length * 16 + livedCareLoad * .35 + (planning.postpartumUntilWeek >= this.week ? 26 : 0), 0, 100) } }, [a, b], { week: this.week });
+  }
+  queuePlayerRelationshipDecision(link, a, b, decision) {
+    this.relationshipSystem.playerPendingDecisions ||= [];
+    const id = `player-relationship-decision:${link.id}:${decision.kind}:${decision.proposedStage || decision.signal || "review"}`;
+    const existing = this.relationshipSystem.playerPendingDecisions.find((entry) => entry.id === id);
+    const value = { id, relationshipId: link.id, personIds: [a.id, b.id], status: "pending", createdWeek: existing?.createdWeek ?? this.week, updatedWeek: this.week, ...decision };
+    if (existing) Object.assign(existing, value);
+    else this.relationshipSystem.playerPendingDecisions.unshift(value);
+    this.relationshipSystem.playerPendingDecisions = this.relationshipSystem.playerPendingDecisions.filter((entry) => entry.status === "pending" && this.week - entry.updatedWeek <= 26).slice(0, 30);
+    return value;
+  }
+  processPlayerRelationshipSignals(link, a, b, signals = []) {
+    signals.forEach((signal) => {
+      if (signal.kind === "family_planning_conversation") this.queuePlayerRelationshipDecision(link, a, b, { kind: "family_planning", signal: signal.kind, reason: signal.reason, priority: signal.priority });
+      if (signal.kind === "parenting_support_needed") {
+        link.parentingSupportNeeded = true;
+        this.queuePlayerRelationshipDecision(link, a, b, { kind: "parenting_support", signal: signal.kind, reason: "A carga parental pede redistribuição de cuidados.", priority: signal.priority });
+      }
+      if (signal.kind === "postpartum_care") [a, b].forEach((person) => { person.energy = clamp(person.energy - 2, 0, 100); person.needs.social = clamp(person.needs.social - 1, 0, 100); });
+      if (signal.kind === "conception_opportunity" && link.lifecycle.familyPlanning.trying && !link.lifecycle.familyPlanning.pregnancyIds.length && Math.random() < signal.likelihood && !this.demographics.pregnancies.some((pregnancy) => pregnancy.status === "active" && pregnancy.parentIds.includes(a.id) && pregnancy.parentIds.includes(b.id))) this.startPregnancy(a, b, { planned: true, bypassFertility: true, relationshipId: link.id });
+    });
+  }
   weeklyRelationships() {
     let formed = 0;
     this.relationships
@@ -5302,27 +5524,27 @@ export class Simulation {
       });
     this.relationships.filter((link) => this.isRomanticLink(link) && link.lifecycle).forEach((link) => {
       const a = this.people.find((person) => person.id === link.a), b = this.people.find((person) => person.id === link.b);
-      if (!a?.alive || !b?.alive || this.isPlayerControlled(a) || this.isPlayerControlled(b) || ["divorciado", "viuvez", "encerrado"].includes(link.lifecycle.stage)) return;
+      const playerLinked = this.isPlayerControlled(a) || this.isPlayerControlled(b);
+      if (!a?.alive || !b?.alive || ["divorciado", "viuvez", "encerrado"].includes(link.lifecycle.stage)) return;
       if (link.lifecycle.startedWeek === this.week) { this.syncRelationshipLifecycle(link, a, b); return; }
-      this.reviewRelationshipAgreements(link, a, b);
-      this.reviewRelationshipFamilyPlanning(link, a, b);
-      const completedWeek = Math.max(0, this.week - 1), currentExperiences = link.lifecycle.experiences.filter((experience) => experience.week === completedWeek), positive = currentExperiences.filter((experience) => experience.tone === "positive" || experience.tone === "support" || experience.valence > 15).length;
-      const familyA = this.familyOf(a), familyB = this.familyOf(b), financialStress = clamp((familyA?.arrears || 0) * 14 + (familyB?.arrears || 0) * 14 + (a.money < 0 ? 18 : 0) + (b.money < 0 ? 18 : 0), 0, 100);
-      const carrier = [a, b].find((person) => person.reproductive?.canGestate && person.age <= 48), conceptionChance = carrier ? clamp((carrier.reproductive.fertility / 100) * (carrier.health / 100) * .22, .015, .24) : 0;
-      const sharedHousehold = this.sharesHousehold(a, b), sharedBuilding = a.homeId && a.homeId === b.homeId;
-      const result = evaluateRelationshipWeekly(link.lifecycle, [a, b], {
-        week: this.week,
-        weeklyContact: link.lastInteractionWeek === completedWeek ? Math.max(1, currentExperiences.length) : sharedHousehold ? 3 : sharedBuilding ? 1 : 0,
-        qualityTime: clamp(positive * 18 + (sharedHousehold ? 18 : sharedBuilding ? 5 : 0), 0, 100),
-        financialStress,
-        parentingStress: link.lifecycle.familyPlanning.parentingLoad,
-        externalStress: ((a.mind?.emotional?.stress || 0) + (b.mind?.emotional?.stress || 0)) / 2,
-        conceptionChance,
-      }, Math.random);
-      link.lifecycle = result.relationship;
-      if (result.transition) this.applyRelationshipTransition(link, a, b, result.transition);
-      else this.syncRelationshipLifecycle(link, a, b);
-      this.processRelationshipSignals(link, a, b, result.signals);
+      let result;
+      if (playerLinked) {
+        this.refreshPlayerRelationshipPlanning(link, a, b);
+        const evaluationContext = this.relationshipWeeklyEvaluationContext(link, a, b), probe = evaluateRelationshipWeekly(link.lifecycle, [a, b], evaluationContext, () => 0);
+        result = evaluateRelationshipWeekly(link.lifecycle, [a, b], evaluationContext, () => 1);
+        link.lifecycle = result.relationship;
+        this.syncRelationshipLifecycle(link, a, b);
+        if (probe.transition) this.queuePlayerRelationshipDecision(link, a, b, { kind: "relationship_transition", proposedStage: probe.transition.to, reason: probe.transition.reason, probability: probe.transition.probability });
+        this.processPlayerRelationshipSignals(link, a, b, result.signals);
+      } else {
+        this.reviewRelationshipAgreements(link, a, b);
+        this.reviewRelationshipFamilyPlanning(link, a, b);
+        result = evaluateRelationshipWeekly(link.lifecycle, [a, b], this.relationshipWeeklyEvaluationContext(link, a, b), Math.random);
+        link.lifecycle = result.relationship;
+        if (result.transition) this.applyRelationshipTransition(link, a, b, result.transition);
+        else this.syncRelationshipLifecycle(link, a, b);
+        this.processRelationshipSignals(link, a, b, result.signals);
+      }
       const planning = link.lifecycle.familyPlanning, unplannedEligible = ["ficante_recorrente", "ficante_exclusivo", "namoro", "uniao_estavel", "noivado", "casamento"].includes(link.lifecycle.stage) && !planning.trying && !planning.pregnancyIds.length && ["none", "unknown", "fertility_awareness"].includes(planning.contraception);
       if (unplannedEligible && Math.random() < (["ficante_recorrente", "ficante_exclusivo"].includes(link.lifecycle.stage) ? .005 : .0025)) this.startPregnancy(a, b, { planned: false, relationshipId: link.id });
     });
@@ -7711,6 +7933,16 @@ export class Simulation {
       p.activity = "Internado";
       return;
     }
+    const relationshipEngagement = p.relationshipEngagement, engagementActor = this.people.find((person) => person.id === relationshipEngagement?.actorId);
+    if (relationshipEngagement && engagementActor?.alive && engagementActor.playerControl?.activeAction?.id === relationshipEngagement.id && p.locationId === relationshipEngagement.placeId) {
+      p.target = null;
+      p.destinationId = null;
+      p.activity = relationshipEngagement.label || `Conversando com ${engagementActor.firstName}`;
+      p.activityCategory = "social";
+      p.actionPriority = 95;
+      return;
+    }
+    if (relationshipEngagement) p.relationshipEngagement = null;
     if (p.bereavement?.visitToday) {
       const cemetery = this.buildingNameIndex?.get("Cemitério da Paz");
       if (cemetery) {
@@ -7837,6 +8069,8 @@ export class Simulation {
   }
   shouldReevaluateDestination(person, hourChanged = false) {
     if (!person?.alive) return false;
+    const engagement = person.relationshipEngagement, actor = this.people.find((candidate) => candidate.id === engagement?.actorId);
+    if (engagement && actor?.alive && actor.playerControl?.activeAction?.id === engagement.id) return false;
     const institutionalKey = `${Number(Boolean(person.justice.incarcerated))}:${Number(Boolean(person.medical.admitted))}`;
     const institutionalChanged = person.destinationInstitutionalKey !== institutionalKey;
     person.destinationInstitutionalKey = institutionalKey;
@@ -7889,6 +8123,11 @@ export class Simulation {
     if (this.minute >= 1440) {
       this.minute -= 1440;
       this.day++;
+      const beginsNewWeek = this.day > 6;
+      if (beginsNewWeek) {
+        this.day = 0;
+        this.week++;
+      }
       this.maintainWorkforce();
       this.dailyHealth();
       this.dailyForensics();
@@ -7905,11 +8144,7 @@ export class Simulation {
       this.dailyFamilyLife();
       this.queueDailyCharacterLife();
       this.transportSystem.dailyRiders = 0;
-      if (this.day > 6) {
-        this.day = 0;
-        this.week++;
-        this.weeklyEconomy({ deferCharacter: true });
-      }
+      if (beginsNewWeek) this.weeklyEconomy({ deferCharacter: true });
       this.dailyCityDynamics();
     }
     const hour = Math.floor(this.minute / 60);
